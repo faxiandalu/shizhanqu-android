@@ -411,6 +411,11 @@ table.grid tbody tr.pin.sel td { background: var(--primary-soft); }
   .qf-head, .qf-line { padding: 7px 6px; }
   .opt { padding: 5px 9px; font-size: 12.5px; }
 
+  /* 手机上「置顶 / 以此检索」按钮加大点，好按 */
+  .dtools { padding: 8px 10px; gap: 8px; }
+  .dtools .btn.sm { height: 34px; padding: 0 12px; font-size: 13px; }
+  .dtip { flex: none; width: 100%; }
+
   .toasts { left: 12px; right: 12px; bottom: 14px; align-items: stretch; }
   .toast { min-width: 0; max-width: none; font-size: 13px; }
   .empty-tip { padding: 40px 16px; font-size: 14px; }
@@ -434,6 +439,9 @@ table.grid tbody tr.pin.sel td { background: var(--primary-soft); }
   .toolbar .sel { height: 30px; }
   .tagbar { min-height: 0; padding: 3px 8px; gap: 5px; }
   .ftag { padding: 1px 5px; font-size: 11px; }
+
+  .dtools { padding: 4px 8px; gap: 6px; flex-wrap: nowrap; overflow-x: auto; }
+  .dtools .dtip { display: none; }
 
   table.grid th { padding: 5px 8px; font-size: 12px; }
   table.grid td { padding: 6px 8px; font-size: 13px; max-width: 240px; }
