@@ -14,9 +14,12 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.io.RandomAccessFile;
+import java.util.ArrayList;
 
 /**
  * 网页与手机 SQLite 之间的桥。
@@ -33,6 +36,11 @@ public class DbBridge {
     private volatile String dbPath;
     private volatile String pendingText;
     private volatile String pendingName;
+
+    // 导入 Excel 用：转成 CSV 放在内部目录，网页分批读取
+    private volatile File csvFile;
+    private volatile ArrayList<Long> csvOffsets;
+    private volatile int csvRows;
 
     DbBridge(Activity a, WebView w) {
         act = a;
@@ -272,6 +280,156 @@ public class DbBridge {
         }
     }
 
+    // ---------------- 导入 Excel ----------------
+
+    /** 弹出系统文件选择器，让用户挑一个 xlsx */
+    @JavascriptInterface
+    public void pickXlsx() {
+        main.post(new Runnable() {
+            @Override
+            public void run() {
+                ((MainActivity) act).pickXlsxFile();
+            }
+        });
+    }
+
+    /** 把选中的 xlsx 转成 CSV 放在内部目录（后台跑，几万行时会回调进度） */
+    public void prepareImport(final Uri uri) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    File dir = new File(act.getFilesDir(), "import");
+                    if (!dir.exists()) {
+                        dir.mkdirs();
+                    }
+                    File out = new File(dir, "incoming.csv");
+                    if (out.exists()) {
+                        out.delete();
+                    }
+                    final int[] last = new int[]{0};
+                    int rows = XlsxToCsv.convert(act, uri, out, new XlsxToCsv.Progress() {
+                        @Override
+                        public void onRows(int r) {
+                            last[0] = r;
+                            notifyImportProgress(r);
+                        }
+                    });
+                    if (rows <= 0) {
+                        throw new Exception("这个文件里没有数据行");
+                    }
+                    csvFile = out;
+                    csvOffsets = buildOffsets(out);
+                    csvRows = rows + 1;   // 第一行是表头
+                    notifyImport(true, "已读取 " + rows + " 行", csvRows);
+                } catch (Exception e) {
+                    csvRows = 0;
+                    notifyImport(false, "读取失败：" + e.getMessage(), 0);
+                }
+            }
+        }).start();
+    }
+
+    /** 转出来的 CSV 一共有多少行（含表头） */
+    @JavascriptInterface
+    public int importCsvRows() {
+        return csvRows;
+    }
+
+    /** 分批读 CSV：from 起 count 行，按行边界切好，网页直接 split("\n") */
+    @JavascriptInterface
+    public String readImportLines(int from, int count) {
+        try {
+            if (csvFile == null || csvOffsets == null || csvOffsets.isEmpty()) {
+                return "";
+            }
+            if (from < 0) {
+                from = 0;
+            }
+            if (from >= csvOffsets.size()) {
+                return "";
+            }
+            int to = Math.min(from + count, csvOffsets.size());
+            long start = csvOffsets.get(from);
+            long end = (to < csvOffsets.size()) ? csvOffsets.get(to) : csvFile.length();
+            int len = (int) (end - start);
+            if (len <= 0) {
+                return "";
+            }
+            RandomAccessFile raf = new RandomAccessFile(csvFile, "r");
+            byte[] b = new byte[len];
+            raf.seek(start);
+            raf.readFully(b);
+            raf.close();
+            return new String(b, "UTF-8");
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /** 一组 SQL 放在一个事务里跑完，比一条条快得多（导入几万行靠它） */
+    @JavascriptInterface
+    public String execBatch(String sqlsJson) {
+        JSONObject out = new JSONObject();
+        try {
+            if (db == null) {
+                out.put("error", "数据库未加载");
+                return out.toString();
+            }
+            JSONArray arr = new JSONArray(sqlsJson);
+            int n = 0;
+            db.beginTransaction();
+            try {
+                for (int i = 0; i < arr.length(); i++) {
+                    String s = arr.getString(i);
+                    if (s == null || s.length() == 0) {
+                        continue;
+                    }
+                    db.execSQL(s);
+                    n++;
+                }
+                db.setTransactionSuccessful();
+            } finally {
+                db.endTransaction();
+            }
+            out.put("ok", true);
+            out.put("count", n);
+        } catch (Exception e) {
+            try {
+                out.put("error", String.valueOf(e.getMessage()));
+            } catch (Exception ignored) {
+            }
+        }
+        return out.toString();
+    }
+
+    /** 记下每一行的字节位置，好按行号随机读取 */
+    private ArrayList<Long> buildOffsets(File f) throws Exception {
+        ArrayList<Long> offs = new ArrayList<Long>();
+        FileInputStream in = new FileInputStream(f);
+        try {
+            byte[] buf = new byte[256 * 1024];
+            long pos = 0;
+            long lineStart = 0;
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                for (int i = 0; i < n; i++) {
+                    if (buf[i] == '\n') {
+                        offs.add(lineStart);
+                        lineStart = pos + i + 1;
+                    }
+                }
+                pos += n;
+            }
+            if (lineStart < f.length()) {
+                offs.add(lineStart);
+            }
+        } finally {
+            in.close();
+        }
+        return offs;
+    }
+
     // ---------------- 导出文件 ----------------
 
     /** 先收下要写的内容，再去问用户存到哪 */
@@ -330,6 +488,14 @@ public class DbBridge {
 
     void notifySaved(final boolean ok, final String msg) {
         callJs("window.__onSaveResult&&window.__onSaveResult(" + (ok ? "true" : "false") + "," + q(msg) + ")");
+    }
+
+    void notifyImport(final boolean ok, final String msg, final int rows) {
+        callJs("window.__onImportReady&&window.__onImportReady(" + (ok ? "true" : "false") + "," + q(msg) + "," + rows + ")");
+    }
+
+    void notifyImportProgress(final int rows) {
+        callJs("window.__onImportProgress&&window.__onImportProgress(" + rows + ")");
     }
 
     private void callJs(final String js) {
