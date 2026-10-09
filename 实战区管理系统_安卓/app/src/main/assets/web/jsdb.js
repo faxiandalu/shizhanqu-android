@@ -365,6 +365,211 @@
     };
   }
 
+  /* ---------------- 导入 ----------------
+   *
+   * 手机上的做法：安卓那边把 xlsx 转成一份中间 CSV，这边分批读进来先写进临时表，
+   * 再用 SQL 一次性比对、更新、插入 —— 几万行也不会把手机内存撑爆。
+   * 判定规则与电脑版 db.py 的「按新ID更新」完全一致：
+   *   系统里没有的新ID → 新增；内容有变化 → 覆盖；没变化 → 原样不动。
+   */
+  var TYPE_SQL = { int: "INTEGER", real: "REAL", text: "TEXT", datetime: "TEXT" };
+  var LABEL_MAP = {};
+  FIELDS.forEach(function (f) { LABEL_MAP[f[1]] = f[0]; });
+  var impSeq = 0;
+
+  /** 一批 SQL 放进一个事务里跑（安卓桥提供 execBatch；测试环境退化成逐条执行） */
+  function runBatch(sqls) {
+    if (!sqls || !sqls.length) return { ok: true, count: 0 };
+    if (global.Android && global.Android.execBatch) {
+      var r = JSON.parse(global.Android.execBatch(JSON.stringify(sqls)));
+      if (r && r.error) return { error: r.error };
+      return { ok: true, count: r.count || 0 };
+    }
+    for (var i = 0; i < sqls.length; i++) {
+      var x = run(sqls[i], []);
+      if (x && x.error) return { error: x.error };
+    }
+    return { ok: true, count: sqls.length };
+  }
+
+  function lit(v) {
+    if (v === null || v === undefined) return "NULL";
+    if (typeof v === "number") return isFinite(v) ? String(v) : "NULL";
+    if (typeof v === "boolean") return v ? "1" : "0";
+    return "'" + esc(v) + "'";
+  }
+
+  /** 只做单引号转义，不带外层引号 */
+  function esc(v) {
+    return String(v).replace(/'/g, "''");
+  }
+
+  function beginImport() {
+    impSeq = 0;
+    var defs = ALL_KEYS.map(function (k) {
+      return col(k) + " " + (TYPE_SQL[FIELD_MAP[k][2]] || "TEXT");
+    }).join(", ") + ", src_row INTEGER";
+    var r = runChange("DROP TABLE IF EXISTS imp_tmp", []);
+    if (r && r.error) return { error: r.error };
+    var r2 = runChange("CREATE TEMP TABLE imp_tmp (" + defs + ")", []);
+    if (r2 && r2.error) return { error: r2.error };
+    return { ok: true };
+  }
+
+  function cancelImport() {
+    var r = runChange("DROP TABLE IF EXISTS imp_tmp", []);
+    if (r && r.error) return { error: r.error };
+    return { ok: true };
+  }
+
+  /** rows: 二维数组，每行按 ALL_KEYS 顺序排列（最后一列不填，src_row 由这里按顺序编号） */
+  function pushImportRows(rows, batchSize) {
+    batchSize = parseInt(batchSize || 500, 10);
+    var colsSql = ALL_KEYS.map(col).join(", ") + ", src_row";
+    var sqls = [];
+    for (var i = 0; i < rows.length; i += batchSize) {
+      var part = rows.slice(i, i + batchSize);
+      var vals = part.map(function (r) {
+        impSeq++;
+        return "(" + ALL_KEYS.map(function (k, j) {
+          var ftype = FIELD_MAP[k][2];
+          var v = r[j];
+          if (TEXT_FIELDS_LIMITED.indexOf(k) >= 0 && typeof v === "string" && v.length > TEXT_MAXLEN) {
+            v = v.slice(0, TEXT_MAXLEN);
+          }
+          return lit(conv(k, ftype, v));
+        }).join(", ") + ", " + impSeq + ")";
+      }).join(", ");
+      sqls.push("INSERT INTO imp_tmp (" + colsSql + ") VALUES " + vals);
+    }
+    // 每 10 条一批送给桥，一次别塞太大的字符串
+    for (var g = 0; g < sqls.length; g += 10) {
+      var rb = runBatch(sqls.slice(g, g + 10));
+      if (rb.error) return { error: rb.error };
+    }
+    return { ok: true, batches: sqls.length };
+  }
+
+  /* 「两边一样」的判定：复刻 db.py 的 _eqval
+   *   空串 与 NULL 视作相同；2 与 2.0 视作相同（数值字段按数值比）
+   *   m = matches（库里），t = imp_tmp（这次导入） */
+  function normExpr(k, alias) {
+    return "nullif(trim(CAST(" + alias + "." + col(k) + " AS TEXT)),'')";
+  }
+  function sameExpr(k) {
+    var ftype = FIELD_MAP[k][2];
+    var a = normExpr(k, "m"), b = normExpr(k, "t");
+    if (ftype === "int" || ftype === "real") {
+      return "(CAST(" + a + " AS REAL) IS CAST(" + b + " AS REAL))";
+    }
+    return "(" + a + " IS " + b + ")";
+  }
+  function sameCond() {
+    return ALL_KEYS.map(sameExpr).join(" AND ");
+  }
+  /** 注意：SQL 里 NOT 比 AND 优先，整串必须再套一层括号 */
+  function diffCond() {
+    return "NOT (" + sameCond() + ")";
+  }
+
+  function finishImport(mode, keepText, srcName) {
+    mode = mode || "update";
+    var keep = keepText !== false;
+    var colsSql = ALL_KEYS.map(col).join(", ");
+    var selSql = ALL_KEYS.map(function (k) { return "t." + col(k); }).join(", ");
+    var stamp = now();
+
+    // 同一个新ID在表里出现多次时，只留最后一条
+    var dd = runChange("DELETE FROM imp_tmp WHERE rowid NOT IN " +
+      "(SELECT MAX(rowid) FROM imp_tmp GROUP BY COALESCE(\"new_id\", rowid))", []);
+    if (dd && dd.error) return { error: dd.error };
+
+    // 八万行时没有索引会慢到卡死
+    var ix = runChange("CREATE INDEX IF NOT EXISTS imp_tmp_newid ON imp_tmp(\"new_id\")", []);
+    if (ix && ix.error) return { error: ix.error };
+
+    var t0 = run("SELECT COUNT(*) AS c FROM imp_tmp", []);
+    if (t0.error) return { error: t0.error };
+    var total = t0.rows.length ? t0.rows[0].c : 0;
+
+    var sqls = [];
+    var inserted = 0, updated = 0, unchanged = 0;
+
+    if (mode === "replace") {
+      sqls.push("DELETE FROM matches");
+      sqls.push("INSERT INTO matches (" + colsSql + ", updated_at, src_row) SELECT " +
+        selSql + ", '" + stamp + "', t.src_row FROM imp_tmp t");
+      inserted = total;
+    } else if (mode === "append") {
+      sqls.push("INSERT INTO matches (" + colsSql + ", updated_at, src_row) SELECT " +
+        selSql + ", '" + stamp + "', t.src_row FROM imp_tmp t");
+      inserted = total;
+    } else {
+      // 保留库里已有的「记录/复盘」：导入里这两列是空白的，就先把库里的值填回来。
+      // 填完之后再用统一的比对规则，就自然等价于电脑版的 keep_text 逻辑了。
+      if (keep) {
+        for (var ti = 0; ti < TEXT_FIELDS_LIMITED.length; ti++) {
+          var tk = TEXT_FIELDS_LIMITED[ti], tc = col(tk);
+          var up = runChange("UPDATE imp_tmp SET " + tc + " = " +
+            "(SELECT m." + tc + " FROM matches m WHERE m.\"new_id\" = imp_tmp.\"new_id\") " +
+            "WHERE (" + tc + " IS NULL OR trim(" + tc + ")='') " +
+            "AND EXISTS (SELECT 1 FROM matches m WHERE m.\"new_id\" = imp_tmp.\"new_id\")", []);
+          if (up && up.error) return { error: up.error };
+        }
+      }
+
+      var same = sameCond();
+
+      var r1 = run("SELECT COUNT(*) AS c FROM imp_tmp t JOIN matches m ON m.\"new_id\" = t.\"new_id\" WHERE " + same, []);
+      if (r1.error) return { error: r1.error };
+      unchanged = r1.rows.length ? r1.rows[0].c : 0;
+
+      var r2 = run("SELECT COUNT(*) AS c FROM imp_tmp t WHERE NOT EXISTS (SELECT 1 FROM matches m WHERE m.\"new_id\" = t.\"new_id\")", []);
+      if (r2.error) return { error: r2.error };
+      inserted = r2.rows.length ? r2.rows[0].c : 0;
+      updated = total - unchanged - inserted;
+      if (updated < 0) updated = 0;
+
+      // 只删掉「有变化」的旧行，再把导入的行写进去；库里没变的那些行原地不动
+      sqls.push("DELETE FROM matches WHERE rowid IN " +
+        "(SELECT m.rowid FROM matches m JOIN imp_tmp t ON t.\"new_id\" = m.\"new_id\" WHERE " + diffCond() + ")");
+      sqls.push("INSERT INTO matches (" + colsSql + ", updated_at, src_row) SELECT " +
+        selSql + ", '" + stamp + "', t.src_row FROM imp_tmp t " +
+        "WHERE NOT EXISTS (SELECT 1 FROM matches m WHERE m.\"new_id\" = t.\"new_id\" AND " + same + ")");
+    }
+
+    sqls.push("INSERT OR REPLACE INTO meta(k,v) VALUES('last_import', '" +
+      esc((srcName || "xlsx") + "|" + stamp + "|" + mode) + "')");
+
+    var r = runBatch(sqls);
+    if (r.error) {
+      runChange("DROP TABLE IF EXISTS imp_tmp", []);
+      return { error: r.error };
+    }
+    runChange("DROP TABLE IF EXISTS imp_tmp", []);
+    return { total: total, inserted: inserted, updated: updated, unchanged: unchanged };
+  }
+
+  /** 一行 CSV（支持引号包裹与 "" 转义） */
+  function parseCsvLine(s) {
+    var out = [], cur = "", inQ = false;
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charAt(i);
+      if (inQ) {
+        if (c === '"') {
+          if (s.charAt(i + 1) === '"') { cur += '"'; i++; }
+          else inQ = false;
+        } else cur += c;
+      } else {
+        if (c === '"') inQ = true;
+        else if (c === ',') { out.push(cur); cur = ""; }
+        else cur += c;
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+
   /* ---------------- 导出 CSV ---------------- */
   function csvCell(v) {
     if (v === null || v === undefined) return "";
@@ -414,6 +619,10 @@
     query: query, getRow: getRow, updateRow: updateRow, insertRow: insertRow,
     deleteRow: deleteRow, deleteMany: deleteMany,
     groupCount: groupCount, distinct: distinct, distinctMulti: distinctMulti,
-    stats: stats, exportCsv: exportCsv
+    stats: stats, exportCsv: exportCsv,
+    LABEL_MAP: LABEL_MAP,
+    parseCsvLine: parseCsvLine,
+    beginImport: beginImport, pushImportRows: pushImportRows,
+    finishImport: finishImport, cancelImport: cancelImport
   };
 })(typeof window !== "undefined" ? window : globalThis);
