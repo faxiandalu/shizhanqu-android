@@ -79,6 +79,13 @@
         <div class="spacer"></div>
         <button class="btn sm" id="btnCloseDrawer">关闭</button>
       </div>
+      <div class="dtools">
+        <button class="btn sm" id="btnPin" title="把这条固定显示在列表第一行（筛选后仍在）">置顶</button>
+        <button class="btn sm primary" id="btnQuickFind"
+          title="以本条为基准检索：胜负 / 负胜取固定值，初让胜 / 初让负取上下各 0.02 的范围">以此检索</button>
+        <button class="btn sm" id="btnTol" title="切换「初让胜 / 初让负」的浮动范围">±0.02</button>
+        <div class="dtip">胜负 / 负胜＝固定值，初让胜 / 初让负＝±<b id="tolTxt">0.02</b></div>
+      </div>
       <div class="dbody" id="dBody"></div>
       <div class="dfoot">
         <button class="btn primary" id="btnSave">保存</button>
