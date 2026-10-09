@@ -165,8 +165,8 @@ public class DbBridge {
                     // 主库和它的一堆旁车文件（WAL 日志）一起清干净，
                     // 否则残留的 -wal 会挂到新库头上，读出来是旧数据
                     deleteDbSet(dst);
-                    deleteDbSet(tmp);   // tmp 只读打开过一次，理论上没日志，保险起见
-                    if (!tmp.renameTo(dst) && !tmp.renameTo(dst)) {
+                    deleteSidecars(tmp);   // 只清 tmp 的日志，tmp 本人还要留着改名
+                    if (!tmp.renameTo(dst)) {
                         // 极少数机型 rename 会失败，退回用流拷贝
                         copyFile(tmp, dst);
                         tmp.delete();
@@ -191,6 +191,20 @@ public class DbBridge {
     /** 删掉一个数据库以及它的 -wal / -shm / -journal 旁车文件 */
     private void deleteDbSet(File f) {
         String[] ext = {"", "-wal", "-shm", "-journal"};
+        for (int i = 0; i < ext.length; i++) {
+            File x = new File(f.getPath() + ext[i]);
+            if (x.exists()) {
+                try {
+                    x.delete();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    /** 只删 -wal / -shm / -journal，主文件留着 */
+    private void deleteSidecars(File f) {
+        String[] ext = {"-wal", "-shm", "-journal"};
         for (int i = 0; i < ext.length; i++) {
             File x = new File(f.getPath() + ext[i]);
             if (x.exists()) {
