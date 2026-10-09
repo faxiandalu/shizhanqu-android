@@ -29,6 +29,10 @@ body {
   background: var(--bg);
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+  /* 竖着排：顶栏占它该占的高度，剩下的全给下面，
+     这样顶栏在手机上变高（横屏变矮）都不会算错，表格不会被挤出屏幕 */
+  display: flex;
+  flex-direction: column;
 }
 button, input, select, textarea { font-family: inherit; font-size: 13px; color: var(--text); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
@@ -38,7 +42,7 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; color: 
 
 /* ---------- 顶栏 ---------- */
 .topbar {
-  height: 54px; display: flex; align-items: center; gap: 14px;
+  height: 54px; flex: none; display: flex; align-items: center; gap: 14px;
   padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--border);
 }
 .brand { display: flex; align-items: center; gap: 9px; font-size: 15px; font-weight: 700; letter-spacing: .3px; }
@@ -71,7 +75,7 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; color: 
 .btn.icon { padding: 0 8px; }
 
 /* ---------- 布局 ---------- */
-.layout { display: flex; height: calc(100% - 54px); }
+.layout { display: flex; flex: 1 1 auto; min-height: 0; }
 .sidebar {
   width: 268px; flex: none; background: var(--panel); border-right: 1px solid var(--border);
   display: flex; flex-direction: column;
@@ -391,4 +395,41 @@ table.grid tbody tr.sel td { background: var(--primary-soft); }
   .toasts { left: 12px; right: 12px; bottom: 14px; align-items: stretch; }
   .toast { min-width: 0; max-width: none; font-size: 13px; }
   .empty-tip { padding: 40px 16px; font-size: 14px; }
+}
+
+/* ==================== 横屏 / 矮屏：把上下那些条压扁，空间全让给数据 ====================
+ * 手机横过来一般只有 350~450px 高，原来顶栏+工具栏+分页就吃掉一大半，
+ * 表格只剩一条缝。这里把所有横条压到最矮，并且不换行。 */
+@media (max-height: 560px) {
+  .topbar { height: 40px; min-height: 40px; padding: 0 8px; gap: 8px; overflow-x: auto; }
+  .topbar .chips { display: none; }
+  .brand { font-size: 12.5px; gap: 6px; }
+  .brand .logo { width: 22px; height: 22px; font-size: 12px; }
+  .brand small { display: none; }
+  .btn { height: 30px; padding: 0 10px; font-size: 12.5px; }
+  .btn.sm { height: 26px; padding: 0 8px; font-size: 12px; }
+
+  .toolbar { flex-wrap: nowrap; padding: 4px 8px; gap: 6px; overflow-x: auto; }
+  .toolbar .inp.search { flex: 0 0 150px; width: 150px; }
+  .toolbar .tb-label { display: none; }
+  .toolbar .sel { height: 30px; }
+  .tagbar { min-height: 0; padding: 3px 8px; gap: 5px; }
+  .ftag { padding: 1px 5px; font-size: 11px; }
+
+  table.grid th { padding: 5px 8px; font-size: 12px; }
+  table.grid td { padding: 6px 8px; font-size: 13px; max-width: 240px; }
+
+  .statbar { padding: 3px 8px; gap: 10px; flex-wrap: nowrap; overflow-x: auto; }
+  .stat-item { padding: 2px 8px; font-size: 12px; }
+  .pager { flex-wrap: nowrap; padding: 4px 8px; gap: 6px; overflow-x: auto; }
+  .pg { height: 28px; min-width: 28px; font-size: 12.5px; }
+
+  /* 筛选抽屉别占太宽，横屏宽度本来就紧张 */
+  .sidebar { width: 62%; max-width: 340px; }
+  .grid2 { grid-template-columns: repeat(2, 1fr); }
+
+  .modal { max-height: 94vh; }
+  .mbody { max-height: 62vh; }
+  .mrow { margin-bottom: 8px; }
+  .empty-tip { padding: 24px 16px; font-size: 13px; }
 }
