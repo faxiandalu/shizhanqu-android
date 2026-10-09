@@ -182,6 +182,11 @@ button, input, select, textarea { font-family: inherit; font-size: 13px; color: 
 .ftag b { font-weight: 600; }
 .ftag .x { cursor: pointer; font-weight: 700; opacity: .7; }
 .ftag .x:hover { opacity: 1; }
+/* 置顶标签：换个颜色跟普通筛选条件区分开 */
+.ftag.pin {
+  background: #fff5e0; color: var(--warn); border-color: #f0d9a8;
+}
+.ftag.pin b { background: var(--warn); color: #fff; border-radius: 3px; padding: 0 4px; }
 
 .table-wrap { flex: 1; overflow: auto; background: #fff; }
 table.grid { border-collapse: separate; border-spacing: 0; width: max-content; min-width: 100%; }
@@ -200,6 +205,13 @@ table.grid td {
 }
 table.grid tbody tr:hover td { background: #f5f8ff; cursor: pointer; }
 table.grid tbody tr.sel td { background: var(--primary-soft); }
+/* 置顶行：左侧一条橙色竖杠，被筛掉时补进来的那行再加个「置顶」小标 */
+table.grid tbody tr.pin td { background: #fffaf0; box-shadow: inset 3px 0 0 #f0b64a; }
+table.grid tbody tr.pin.sel td { background: var(--primary-soft); }
+.pinmark {
+  display: inline-block; margin-right: 5px; padding: 0 5px; border-radius: 3px;
+  background: var(--warn); color: #fff; font-size: 10px; line-height: 16px; vertical-align: 1px;
+}
 .cell-note { color: var(--ok); font-weight: 600; }
 .cell-empty { color: #c4cad3; }
 .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; background: #eef1f5; color: var(--text-2); }
@@ -250,6 +262,13 @@ table.grid tbody tr.sel td { background: var(--primary-soft); }
 .drawer-inner { width: 420px; display: flex; flex-direction: column; height: 100%; }
 .dhead { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
 .dhead h3 { margin: 0; font-size: 14px; }
+/* 置顶 / 快捷检索 / 浮动范围：选中一条后拿它当参照的那排按钮 */
+.dtools {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 7px 12px; border-bottom: 1px solid var(--border); background: var(--panel-2);
+}
+.dtip { font-size: 11px; color: var(--muted); line-height: 1.4; flex: 1; min-width: 120px; }
+.dtip b { color: var(--warn); }
 .dbody { flex: 1; overflow-y: auto; padding: 10px 12px 20px; }
 .dfoot { padding: 10px 12px; border-top: 1px solid var(--border); display: flex; gap: 8px; }
 .field { margin-bottom: 9px; }
