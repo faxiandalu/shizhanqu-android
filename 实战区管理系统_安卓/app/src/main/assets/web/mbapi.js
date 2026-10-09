@@ -18,6 +18,12 @@
     },
     pickDb: function () { A.pickDb(); },
     reloadDb: function () { A.reloadDb(); },
+    /* 导入 Excel：弹出系统文件选择器 -> 转成 CSV -> 网页分批读进来 */
+    pickXlsx: function () { try { A.pickXlsx(); } catch (e) { } },
+    importCsvRows: function () { try { return A.importCsvRows(); } catch (e) { return 0; } },
+    readImportLines: function (from, count) {
+      try { return A.readImportLines(from, count); } catch (e) { return ""; }
+    },
     saveText: function (name, text) { A.saveText(name, text); },
     sysToast: function (msg) { try { A.toast(msg); } catch (e) { } },
 
