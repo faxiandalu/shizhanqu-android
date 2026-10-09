@@ -1238,8 +1238,141 @@ function openDbPanel(first) {
   on("#dbReload", () => { toast("正在重新读取…"); MB.reloadDb(); });
 }
 
+/* ---------------- 手机版：从 Excel 导入 ----------------
+ * 流程：网页弹窗选模式 -> 调安卓去挑 xlsx -> Java 那边转成 CSV
+ *      -> 回调 __onImportReady -> 网页分批读 CSV 写进临时表 -> SQL 比对入库。
+ * 判定规则和电脑端完全一致：没有的新ID新增，有变化的覆盖，没变化的原样不动。
+ */
+function importMobile() {
+  openModal(`
+    <h3>导入 Excel 表格</h3>
+    <div class="mbody">
+      <div class="mrow">
+        <label>导入方式</label>
+        <div class="radio-col">
+          <label><input type="radio" name="mode" value="update" checked> <b>按新ID更新（推荐）</b>：新ID 已存在的，内容有变化就覆盖、没变化就保留；新ID 没有的，新增</label>
+          <label><input type="radio" name="mode" value="replace"> 覆盖重建：清空全部数据后重新导入（会丢掉已写的 记录 / 复盘）</label>
+          <label><input type="radio" name="mode" value="append"> 追加：全部作为新行插入（会产生重复）</label>
+        </div>
+      </div>
+      <div class="mrow">
+        <label class="chk-line"><input type="checkbox" id="impKeepText" checked>
+          保留系统内已有的「记录 / 复盘」（表格里这两列是空的，就不清掉我写的）</label>
+      </div>
+      <div class="hint">表头要和原表一致（新ID、比赛时间、竞彩场次、联赛、主队（让球）vs客队 …）。<br>
+        8 万行大概要 1~3 分钟，中途别退出。读到哪一步下面会显示。</div>
+      <div class="progress" id="impBar"><i></i></div>
+      <div id="impText" style="font-size:12px;color:var(--text-2);margin-top:6px"></div>
+    </div>
+    <div class="mfoot">
+      <button class="btn" id="impCancel">取消</button>
+      <button class="btn primary" id="impPick">选择 Excel 文件</button>
+    </div>`);
+  on("#impCancel", closeModal);
+  on("#impPick", () => {
+    window.__impOpts = {
+      mode: ($('input[name="mode"]:checked') || {}).value || "update",
+      keepText: ($("#impKeepText") || {}).checked !== false
+    };
+    const t = $("#impText"); if (t) t.textContent = "正在打开系统文件选择器…";
+    MB.pickXlsx();
+  });
+}
+
+function impBar(pct, text) {
+  const b = $("#impBar"); if (b) b.querySelector("i").style.width = Math.max(0, Math.min(100, pct)) + "%";
+  const t = $("#impText"); if (t) t.textContent = text || "";
+}
+
+async function runMobileImport(opt) {
+  const A = window.Android;
+  let header = null;
+  let from = 0, read = 0;
+  const CHUNK = 1200;
+  const total = A.importCsvRows();
+  try {
+    let r = JSDB.beginImport();
+    if (r.error) throw new Error(r.error);
+    impBar(2, "正在写入临时表…");
+
+    while (true) {
+      const txt = A.readImportLines(from, CHUNK);
+      if (!txt) break;
+      const lines = txt.split("\n");
+      while (lines.length && lines[lines.length - 1] === "") lines.pop();
+      if (!lines.length) break;
+
+      if (!header) {
+        header = JSDB.parseCsvLine(lines[0]).map(s => String(s).trim());
+        const pos = JSDB.ALL_KEYS.map(k => header.indexOf(JSDB.FIELD_MAP[k][1]));
+        const iId = JSDB.ALL_KEYS.indexOf("new_id");
+        const iTime = JSDB.ALL_KEYS.indexOf("match_time");
+        if (pos[iId] < 0 && pos[iTime] < 0) {
+          throw new Error("表头不符合预期，没找到「新ID」或「比赛时间」列");
+        }
+      }
+      const consumed = lines.length;
+      const body = (from === 0) ? lines.slice(1) : lines;
+
+      const pos = JSDB.ALL_KEYS.map(k => header.indexOf(JSDB.FIELD_MAP[k][1]));
+      const rows = [];
+      for (const ln of body) {
+        if (!ln) continue;
+        const cells = JSDB.parseCsvLine(ln);
+        const row = pos.map(p => (p >= 0 ? cells[p] : ""));
+        let blank = true;
+        for (const v of row) { if (v !== "" && v !== null && v !== undefined) { blank = false; break; } }
+        if (blank) continue;
+        rows.push(row);
+      }
+      if (rows.length) {
+        const rr = JSDB.pushImportRows(rows);
+        if (rr.error) throw new Error(rr.error);
+      }
+      read += consumed;
+      from += consumed;
+      impBar(2 + Math.round(read / Math.max(total, 1) * 88),
+        `已读取 ${read} 行 / 共 ${total} 行`);
+      await sleep(0);           // 让界面有机会刷新
+      if (consumed < CHUNK) break;
+    }
+
+    impBar(92, "正在比对入库…");
+    await sleep(20);
+    const res = JSDB.finishImport(opt.mode, opt.keepText, "xlsx");
+    if (res.error) throw new Error(res.error);
+    impBar(100, "导入完成");
+    closeModal();
+    toast(`导入完成：共 ${res.total} 行，新增 ${res.inserted} 条，覆盖 ${res.updated} 条，没变化 ${res.unchanged} 条`);
+    await loadStats();
+    buildQuickPanel();
+    S.page = 1;
+    await refresh({ force: true });
+  } catch (e) {
+    try { JSDB.cancelImport(); } catch (_) { }
+    impBar(0, "");
+    toast("导入失败：" + (e.message || e), { err: true });
+  }
+}
+
+/* 安卓那边转完 CSV 会调这两个回调 */
+window.__onImportProgress = function (rows) {
+  impBar(Math.min(90, 5 + Math.round(rows / 3000)), `正在解析表格…已转换 ${rows} 行`);
+};
+window.__onImportReady = async function (ok, msg, rows) {
+  if (!ok) {
+    if (/取消/.test(msg || "")) { impBar(0, "已取消"); return; }
+    impBar(0, "");
+    toast("读取失败：" + msg, { err: true });
+    return;
+  }
+  if (!MB.ready()) { toast("数据库还没加载，先点「数据」选一下 db 文件", { err: true }); return; }
+  const opt = window.__impOpts || { mode: "update", keepText: true };
+  await runMobileImport(opt);
+};
+
 /* ---------------- 事件绑定 ---------------- */
-on("#btnImport", () => openImport(false));
+on("#btnImport", () => (MOBILE ? importMobile() : openImport(false)));
 on("#btnExport", openExport);
 on("#btnSync", openSync);
 on("#btnDb", () => openDbPanel(false));
