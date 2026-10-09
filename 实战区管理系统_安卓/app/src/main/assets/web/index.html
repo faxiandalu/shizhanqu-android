@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>入库实战区</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div class="topbar">
+  <button class="btn side-toggle" id="btnSide" title="打开筛选面板">筛选</button>
+  <div class="brand">
+    <span class="logo">实</span>
+    <span>入库实战区 <small>手机版</small></span>
+  </div>
+  <div class="chips" id="stats"></div>
+  <div class="spacer"></div>
+  <button class="btn" id="btnDb" title="选择 / 更新数据库文件">数据</button>
+  <button class="btn" id="btnExport">导出</button>
+  <button class="btn" id="btnNew">新增</button>
+  <button class="btn icon" id="btnRefresh" title="刷新">刷新</button>
+</div>
+
+<div class="layout">
+  <aside class="sidebar" id="sidebar">
+    <div class="side-head">
+      <h3>筛选条件</h3>
+      <div class="spacer"></div>
+      <button class="btn sm" id="btnClearFilter">清空</button>
+      <button class="btn sm side-close" id="btnSideClose">收起</button>
+    </div>
+    <div class="side-body">
+      <div class="qf-panel">
+        <div class="side-sub">
+          <h4>常用筛选</h4>
+          <span class="spacer"></span>
+          <button class="btn sm" id="btnClearQuick">清空</button>
+          <button class="btn sm" id="btnFoldQuick" title="收起 / 展开">收起</button>
+        </div>
+        <div class="qf-wrap" id="quickPanel"></div>
+      </div>
+      <div class="side-sub">
+        <h4>全部字段</h4>
+      </div>
+      <div id="filterPanel"></div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <div class="toolbar">
+      <input class="inp search" id="kw" placeholder="搜索：球队 / 联赛 / 场次">
+      <button class="btn" id="btnSearch">查询</button>
+      <div class="spacer"></div>
+      <label class="tb-label">排序</label>
+      <select class="sel" id="sortField"></select>
+      <select class="sel" id="sortDir">
+        <option value="asc">升序</option>
+        <option value="desc">降序</option>
+      </select>
+      <label class="tb-label">每页</label>
+      <select class="sel" id="pageSize">
+        <option>50</option><option>100</option><option>200</option><option>500</option>
+      </select>
+      <button class="btn" id="btnCols">列</button>
+      <button class="btn" id="btnResetCols">默认</button>
+    </div>
+    <div class="tagbar" id="tagbar"></div>
+    <div class="table-wrap" id="tableWrap"></div>
+    <div class="statbar" id="statbar"></div>
+    <div class="pager" id="pager"></div>
+  </div>
+
+  <aside class="drawer" id="drawer">
+    <div class="drawer-inner">
+      <div class="dhead">
+        <h3 id="dTitle">记录详情</h3>
+        <div class="spacer"></div>
+        <button class="btn sm" id="btnCloseDrawer">关闭</button>
+      </div>
+      <div class="dbody" id="dBody"></div>
+      <div class="dfoot">
+        <button class="btn primary" id="btnSave">保存</button>
+        <div class="spacer"></div>
+        <button class="btn danger" id="btnDelete">删除</button>
+      </div>
+    </div>
+  </aside>
+</div>
+
+<div class="side-mask" id="sideMask"></div>
+
+<div class="popover" id="colPop">
+  <div style="font-size:12px;color:var(--muted);margin-bottom:8px">勾选要显示的列</div>
+  <div id="colGroups"></div>
+  <div style="margin-top:10px;display:flex;gap:6px">
+    <button class="btn sm" id="colAll">全选</button>
+    <button class="btn sm" id="colNone">全不选</button>
+    <div class="spacer"></div>
+    <button class="btn sm primary" id="colOk">确定</button>
+  </div>
+</div>
+
+<div class="mask" id="mask">
+  <div class="modal" id="modal"></div>
+</div>
+
+<div class="loading" id="loading"><div style="text-align:center">
+  <div class="spinner" style="margin:0 auto"></div><div style="margin-top:8px;color:var(--text-2);font-size:12px" id="loadingText">处理中…</div>
+</div></div>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="jsdb.js"></script>
+<script src="mbapi.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,8 @@
+// 根目录配置：只用官方 Android 插件，不引入任何第三方库
+plugins {
+    id 'com.android.application' version '8.1.4' apply false
+}
+
+task clean(type: Delete) {
+    delete rootProject.buildDir
+}

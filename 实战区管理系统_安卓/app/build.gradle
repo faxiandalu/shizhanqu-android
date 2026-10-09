@@ -1,0 +1,42 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.shizhanqu.app'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.shizhanqu.app"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+
+    // 中文资源与注释全部 UTF-8
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // assets 里的网页不压缩，避免个别 WebView 解压异常
+    androidResources {
+        noCompress 'db'
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}
+
+// 零第三方依赖：只用系统自带的 WebView 与 SQLite
+dependencies {
+}
