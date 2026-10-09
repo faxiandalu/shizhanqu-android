@@ -20,6 +20,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.RandomAccessFile;
 import java.util.ArrayList;
+import java.util.Locale;
 
 /**
  * 网页与手机 SQLite 之间的桥。
@@ -97,7 +98,14 @@ public class DbBridge {
         copyAndOpen(Uri.parse(u));
     }
 
-    /** 把选中的文件复制到 App 内部目录再打开（38MB 左右，后台复制） */
+    /** 把选中的文件复制到 App 内部目录再打开（38MB 左右，后台复制）
+     *
+     * 顺序很关键：必须「先让文件就位、再打开连接」。
+     * 以前是先在 shizhanqu.tmp 上打开、再 rename 成 shizhanqu.db，
+     * SQLite 会发现路径上的文件已经不是当初那个，把连接锁成只读，
+     * 结果就是：查询正常，一保存就报
+     *   attempt to write a readonly database (code 1032 SQLITE_READONLY_DBMOVED)
+     */
     public void copyAndOpen(final Uri uri) {
         new Thread(new Runnable() {
             @Override
@@ -132,30 +140,45 @@ public class DbBridge {
                         throw new Exception("文件只有 " + total + " 字节，不像数据库文件");
                     }
 
-                    SQLiteDatabase ndb = SQLiteDatabase.openDatabase(
-                            tmp.getPath(), null, SQLiteDatabase.OPEN_READWRITE);
+                    // 先在临时文件上以只读方式验一下结构，别急着替换
                     long cnt;
+                    SQLiteDatabase chk = SQLiteDatabase.openDatabase(
+                            tmp.getPath(), null, SQLiteDatabase.OPEN_READONLY);
                     try {
-                        cnt = countMatches(ndb);
+                        cnt = countMatches(chk);
                     } catch (Exception e) {
-                        ndb.close();
+                        chk.close();
                         throw new Exception("这个文件里没有 matches 表，请选择 shizhanqu.db");
                     }
+                    chk.close();
 
-                    if (dst.exists()) {
-                        dst.delete();
-                    }
-                    tmp.renameTo(dst);
-
+                    // 关掉旧连接之后再动文件，避免旧连接变成「文件被移走」的只读状态
                     SQLiteDatabase old = db;
-                    db = ndb;
-                    dbPath = dst.getPath();
+                    db = null;
                     if (old != null) {
                         try {
                             old.close();
                         } catch (Exception ignored) {
                         }
                     }
+
+                    // 主库和它的一堆旁车文件（WAL 日志）一起清干净，
+                    // 否则残留的 -wal 会挂到新库头上，读出来是旧数据
+                    deleteDbSet(dst);
+                    deleteDbSet(tmp);   // tmp 只读打开过一次，理论上没日志，保险起见
+                    if (!tmp.renameTo(dst) && !tmp.renameTo(dst)) {
+                        // 极少数机型 rename 会失败，退回用流拷贝
+                        copyFile(tmp, dst);
+                        tmp.delete();
+                    }
+                    if (!dst.exists()) {
+                        throw new Exception("写不进 App 内部目录");
+                    }
+
+                    SQLiteDatabase ndb = SQLiteDatabase.openDatabase(
+                            dst.getPath(), null, SQLiteDatabase.OPEN_READWRITE);
+                    db = ndb;
+                    dbPath = dst.getPath();
                     savePref("db_uri", uri.toString());
                     notifyDb(true, "已加载 " + cnt + " 条");
                 } catch (Exception e) {
@@ -163,6 +186,66 @@ public class DbBridge {
                 }
             }
         }).start();
+    }
+
+    /** 删掉一个数据库以及它的 -wal / -shm / -journal 旁车文件 */
+    private void deleteDbSet(File f) {
+        String[] ext = {"", "-wal", "-shm", "-journal"};
+        for (int i = 0; i < ext.length; i++) {
+            File x = new File(f.getPath() + ext[i]);
+            if (x.exists()) {
+                try {
+                    x.delete();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private void copyFile(File src, File dst) throws Exception {
+        InputStream in = new FileInputStream(src);
+        OutputStream out = new FileOutputStream(dst);
+        try {
+            byte[] buf = new byte[256 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) {
+                out.write(buf, 0, n);
+            }
+        } finally {
+            out.close();
+            in.close();
+        }
+    }
+
+    /** 连接被系统搞成只读时（1032 SQLITE_READONLY_DBMOVED），重新开一次就能救回来 */
+    private boolean reopenIfMoved(String errMsg) {
+        if (errMsg == null) {
+            return false;
+        }
+        String m = errMsg.toLowerCase(Locale.US);
+        if (m.indexOf("readonly") < 0 && m.indexOf("1032") < 0 && m.indexOf("dbmoved") < 0) {
+            return false;
+        }
+        if (dbPath == null) {
+            return false;
+        }
+        try {
+            if (db != null) {
+                try {
+                    db.close();
+                } catch (Exception ignored) {
+                }
+                db = null;
+            }
+            if (!new File(dbPath).exists()) {
+                return false;
+            }
+            db = SQLiteDatabase.openDatabase(dbPath, null, SQLiteDatabase.OPEN_READWRITE);
+            return true;
+        } catch (Exception e) {
+            db = null;
+            return false;
+        }
     }
 
     /** 启动时悄悄打开上次复制好的数据库 */
@@ -231,7 +314,8 @@ public class DbBridge {
         return out.toString();
     }
 
-    /** 增删改：返回 {"changes":n,"lastId":n} */
+    /** 增删改：返回 {"changes":n,"lastId":n}
+     *  万一撞上「数据库被移走」变成只读，自动重开一次连接再试一遍 */
     @JavascriptInterface
     public String execChange(String sql, String argsJson) {
         JSONObject out = new JSONObject();
@@ -240,7 +324,14 @@ public class DbBridge {
                 out.put("error", "数据库未加载");
                 return out.toString();
             }
-            db.execSQL(sql, toArgs(argsJson));
+            try {
+                db.execSQL(sql, toArgs(argsJson));
+            } catch (Exception e1) {
+                if (!reopenIfMoved(e1.getMessage())) {
+                    throw e1;
+                }
+                db.execSQL(sql, toArgs(argsJson));
+            }
             out.put("lastId", scalar("SELECT last_insert_rowid()"));
             out.put("changes", scalar("SELECT changes()"));
         } catch (Exception e) {
@@ -379,18 +470,31 @@ public class DbBridge {
             JSONArray arr = new JSONArray(sqlsJson);
             int n = 0;
             db.beginTransaction();
+            boolean retried = false;
             try {
                 for (int i = 0; i < arr.length(); i++) {
                     String s = arr.getString(i);
                     if (s == null || s.length() == 0) {
                         continue;
                     }
-                    db.execSQL(s);
+                    try {
+                        db.execSQL(s);
+                    } catch (Exception e1) {
+                        if (retried || !reopenIfMoved(e1.getMessage())) {
+                            throw e1;
+                        }
+                        retried = true;
+                        db.beginTransaction();      // 旧事务随旧连接没了，重开一个
+                        db.execSQL(s);
+                    }
                     n++;
                 }
                 db.setTransactionSuccessful();
             } finally {
-                db.endTransaction();
+                try {
+                    db.endTransaction();
+                } catch (Exception ignored) {
+                }
             }
             out.put("ok", true);
             out.put("count", n);
