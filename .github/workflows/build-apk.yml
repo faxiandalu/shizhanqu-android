@@ -18,16 +18,33 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: 装 Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 补齐 SDK 组件
+      # 不用 android-actions/setup-android：它会去装已废弃的 tools 包并崩溃。
+      # GitHub 服务器本身自带 Android SDK，直接指过去用。
+      - name: 指向自带的 Android SDK
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          SDK=/usr/local/lib/android/sdk
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+          ls "$SDK"
+          echo "--- platforms ---"; ls "$SDK/platforms" || true
+          echo "--- build-tools ---"; ls "$SDK/build-tools" || true
 
-      # 工程里没有 gradlew（本机生成不了 gradle-wrapper.jar），
-      # 所以云端直接装一份 Gradle 用；如果工程里以后有 gradlew 了，就自动优先用它
+      - name: 补齐 SDK 组件（缺什么装什么）
+        run: |
+          SM=$(ls -d /usr/local/lib/android/sdk/cmdline-tools/*/bin/sdkmanager | head -1)
+          echo "sdkmanager=$SM"
+          yes | $SM --licenses > /dev/null 2>&1 || true
+          if [ ! -d /usr/local/lib/android/sdk/platforms/android-34 ]; then
+            $SM "platforms;android-34" 2>&1 | tail -3
+          else
+            echo "platforms;android-34 already installed"
+          fi
+          if [ ! -d /usr/local/lib/android/sdk/build-tools/34.0.0 ]; then
+            $SM "build-tools;34.0.0" 2>&1 | tail -3
+          else
+            echo "build-tools;34.0.0 already installed"
+          fi
+
       - name: 准备 Gradle 8.2
         run: |
           if [ -f gradlew ]; then
@@ -45,6 +62,9 @@ jobs:
         run: |
           java -version 2>&1 | head -2
           echo "JAVA_HOME=$JAVA_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
           (gradle -v 2>&1 | head -6) || true
 
       - name: 编译 APK（调试签名，装上就能用）
