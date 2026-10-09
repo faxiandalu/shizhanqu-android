@@ -13,6 +13,13 @@ const DEFAULT_COLS = ["new_id", "match_time", "match_no", "league", "teams",
 /* 这三组赔率列左侧画一条分割线：初胜组 / 初让胜组 / 胜负组 */
 const SEP_COLS = ["s_win", "s_h_win", "wl"];
 const COLS_KEY = "szq_cols_v2";
+const PIN_KEY = "szq_pin_v1";
+const TOL_KEY = "szq_tol_v1";
+/* 快捷检索：胜负 / 负胜 取固定值（精确等于），初让胜 / 初让负 取浮动范围 */
+const QF_FIXED = ["wl", "lw"];
+const QF_RANGE = ["s_h_win", "s_h_lose"];
+const QF_KEYS = QF_FIXED.concat(QF_RANGE);
+const TOL_LIST = [0.01, 0.02, 0.03, 0.05];
 const GROUP_ORDER = ["基本信息", "赛果", "赔率", "记录复盘"];
 const RESULT_STYLE = { "胜": "win", "平": "draw", "负": "lose", "让胜": "win", "让平": "draw", "让负": "lose" };
 /* 状态栏统计：只统计这两个字段，按指定顺序展示 */
@@ -41,6 +48,8 @@ const S = {
   distinct: {},
   quick: {},          // 常用筛选：{ key: {dir, items:[{value,count}], sel:[...]} }
   sel: null, editing: null,
+  pin: null,          // 置顶行：{ id, new_id, label }，筛选后仍排第一行
+  tol: 0.02,          // 快捷检索里「初让胜 / 初让负」的浮动范围
   stats: {}, envPath: ""
 };
 
@@ -142,6 +151,12 @@ async function boot() {
   const saved = LS.get(COLS_KEY);
   if (saved) { try { S.cols = JSON.parse(saved); } catch (e) { } }
   LS.del("szq_cols");   // 旧版默认列缓存作废
+
+  /* 置顶行 / 浮动范围：记住上次的选择，重开 App 还在 */
+  const sp = LS.get(PIN_KEY);
+  if (sp) { try { const p = JSON.parse(sp); if (p && p.new_id !== undefined) S.pin = p; } catch (e) { } }
+  const st = LS.get(TOL_KEY);
+  if (st) { const t = parseFloat(st); if (!isNaN(t)) S.tol = t; }
 
   buildSortSelect();
   buildColPopover();
@@ -559,14 +574,148 @@ function clearAllFilters() {
   S.page = 1; renderTags(); refresh();
 }
 
+/* ---------------- 置顶行 ----------------
+ * 选中一条比赛后就把它记住：以后不管怎么筛，它都排在窗口第一行，
+ * 用来当参照物跟别的比赛对比。纯粹在前端挪位置，不动 SQL、不影响命中数。 */
+
+function setPin(row) {
+  if (!row || !row.id) return;
+  S.pin = { id: row.id, new_id: row.new_id, label: row.teams || ("#" + (row.new_id || row.id)) };
+  LS.set(PIN_KEY, JSON.stringify(S.pin));
+}
+function clearPin() {
+  S.pin = null;
+  LS.del(PIN_KEY);
+}
+
+/** 在当前这批行里把置顶行挪到最前（不发请求，立刻见效） */
+function pinToFrontLocal() {
+  if (!S.pin || !S.rows.length) return;
+  const i = S.rows.findIndex(r =>
+    r.id === S.pin.id || (S.pin.new_id != null && String(r.new_id) === String(S.pin.new_id)));
+  if (i > 0) { const r = S.rows.splice(i, 1)[0]; S.rows.unshift(r); }
+  S.rows.forEach(r => { delete r.__pin; });
+}
+
+/** 刷新时调用：能挪就挪；被当前条件筛掉了，就在第 1 页把它补到最前面当参照 */
+async function applyPinRow(rows) {
+  S.rows.forEach(r => { delete r.__pin; });
+  rows.forEach(r => { delete r.__pin; });
+  if (!S.pin) return rows;
+  const i = rows.findIndex(r =>
+    r.id === S.pin.id || (S.pin.new_id != null && String(r.new_id) === String(S.pin.new_id)));
+  if (i === 0) return rows;
+  if (i > 0) { const r = rows.splice(i, 1)[0]; rows.unshift(r); return rows; }
+  if (S.page !== 1 || S.pin.new_id === undefined || S.pin.new_id === null) return rows;
+  try {
+    const j = await api("query", {
+      filters: [{ field: "new_id", op: "eq", value: S.pin.new_id }],
+      sort: S.sort, page: 1, size: 1
+    });
+    const r = (j.rows || [])[0];
+    if (r) { r.__pin = 1; rows.unshift(r); }
+    else clearPin();          // 数据里已经没有这条了（导入后可能变了），自动取消
+  } catch (e) { }
+  return rows;
+}
+
+function togglePin() {
+  if (!S.sel) { toast("先点开一条比赛再置顶", { err: true }); return; }
+  if (S.pin && S.pin.id === S.sel) {
+    clearPin();
+    toast("已取消置顶");
+  } else {
+    setPin(S.editing);
+    pinToFrontLocal();
+    toast("已置顶，筛选后它仍排第一行");
+  }
+  renderPinUI(); renderTags(); renderTable();
+}
+
+function renderPinUI() {
+  const b = $("#btnPin");
+  if (!b) return;
+  const on = !!(S.pin && S.sel && S.pin.id === S.sel);
+  b.textContent = on ? "取消置顶" : "置顶";
+  b.classList.toggle("primary", on);
+}
+
+/* ---------------- 快捷检索 ----------------
+ * 以选中那条为基准：胜负 / 负胜 取固定值，初让胜 / 初让负 取 ±tol 的范围。
+ * 写进的是普通筛选条件，所以之后还能继续叠加、修改、删掉其中任何一个。 */
+
+function syncRangeInputs(key, lo, hi) {
+  const row = $(`#filterPanel [data-key="${key}"]`);
+  if (!row) return;
+  const ins = $$(".inp", row);
+  if (ins.length >= 2) { ins[0].value = lo; ins[1].value = hi; }
+}
+
+/** 常用筛选里「固定值」那两行（胜负 / 负胜）也跟着填上，两边保持一致 */
+function syncQuickSingle(key, v) {
+  const row = $(`#quickPanel .qf-row[data-key="${key}"]`);
+  if (!row) return;
+  const i = $(".qf-val", row);
+  if (i) i.value = (v === null || v === undefined) ? "" : v;
+}
+
+async function quickFindFromSel() {
+  const row = S.editing;
+  if (!row || !row.id) { toast("先点开一条比赛，再按它检索", { err: true }); return; }
+  const tol = S.tol;
+  const parts = [], miss = [];
+  QF_KEYS.forEach(k => {
+    const v = row[k];
+    if (v === null || v === undefined || v === "") {
+      delete S.filters[k]; refreshQuickUI(k); refreshNormalUI(k);
+      miss.push(S.fmap[k].label); return;
+    }
+    const n = Number(v);
+    if (QF_FIXED.indexOf(k) >= 0) {
+      // 胜负 / 负胜：固定值，精确等于
+      S.filters[k] = { field: k, op: "eq", value: n };
+      refreshQuickUI(k); refreshNormalUI(k); syncQuickSingle(k, n);
+      parts.push(`${S.fmap[k].label}=${n}`);
+    } else {
+      const lo = +(n - tol).toFixed(4), hi = +(n + tol).toFixed(4);
+      S.filters[k] = { field: k, op: "between", value: [lo, hi] };
+      refreshQuickUI(k); refreshNormalUI(k); syncRangeInputs(k, lo, hi);
+      parts.push(`${S.fmap[k].label} ${lo}~${hi}`);
+    }
+  });
+  S.page = 1;
+  renderTags();
+  renderPinUI();
+  closeDrawer();
+  refresh();
+  toast(parts.join(" · ") + (miss.length ? `（${miss.join("、")}为空，已跳过）` : ""));
+}
+
+function cycleTol() {
+  const i = TOL_LIST.indexOf(S.tol);
+  S.tol = TOL_LIST[(i + 1) % TOL_LIST.length];
+  LS.set(TOL_KEY, String(S.tol));
+  renderTolUI();
+  toast("初让胜 / 初让负 的浮动范围改为 ±" + S.tol);
+}
+function renderTolUI() {
+  const b = $("#btnTol"), t = $("#tolTxt");
+  if (b) b.textContent = "±" + S.tol;
+  if (t) t.textContent = String(S.tol);
+}
+
 function renderTags() {
   const box = $("#tagbar");
   const list = Object.values(S.filters);
+  const pinTag = S.pin
+    ? `<span class="ftag pin"><b>置顶</b>${esc(S.pin.label)}<span class="x" data-pin="1">×</span></span>` : "";
   if (!list.length) {
-    box.innerHTML = `<span style="color:var(--muted);font-size:12px">未设置筛选条件，当前显示全部 ${S.total} 条</span>`;
+    box.innerHTML = pinTag +
+      `<span style="color:var(--muted);font-size:12px">${pinTag ? "" : "未设置筛选条件，" }当前显示全部 ${S.total} 条</span>`;
+    bindTagX(box);
     return;
   }
-  box.innerHTML = list.map(f => {
+  box.innerHTML = pinTag + list.map(f => {
     const label = S.fmap[f.field].label;
     let txt;
     if (f.op === "in") {
@@ -581,7 +730,15 @@ function renderTags() {
     else txt = ({ contains: "包含", eq: "等于", startswith: "开头" })[f.op] + " " + f.value;
     return `<span class="ftag"><b>${esc(label)}</b>${esc(txt)}<span class="x" data-k="${f.field}">×</span></span>`;
   }).join("") + `<span style="color:var(--muted);font-size:12px">共 ${list.length} 个条件 · 命中 ${S.total} 条</span>`;
-  $$(".x", box).forEach(x => x.onclick = () => removeFilter(x.dataset.k));
+  bindTagX(box);
+}
+
+/** 标签上的 ×：普通条件删筛选，置顶标签取消置顶 */
+function bindTagX(box) {
+  $$(".x[data-k]", box).forEach(x => x.onclick = () => removeFilter(x.dataset.k));
+  $$(".x[data-pin]", box).forEach(x => x.onclick = () => {
+    clearPin(); renderPinUI(); renderTags(); renderTable();
+  });
 }
 
 /* ---------------- 查询与表格 ---------------- */
@@ -598,7 +755,7 @@ async function refresh(opts) {
   try {
     const j = await api("query", { filters, sort: S.sort, page: S.page, size: S.size });
     if (seq !== QSEQ) return;
-    S.total = j.total; S.rows = j.rows || [];
+    S.total = j.total; S.rows = await applyPinRow(j.rows || []);
     renderTable(); renderPager(); renderTags();
   } catch (e) { if (seq === QSEQ) toast("查询失败：" + e.message, { err: true }); }
   // 统计栏与常用筛选的剩余取值一起刷新，省一轮等待
@@ -690,8 +847,10 @@ function renderTable() {
   });
   html += `</tr></thead><tbody>`;
   S.rows.forEach(r => {
-    html += `<tr data-id="${r.id}" class="${S.sel === r.id ? "sel" : ""}">` +
-      cols.map((k, i) => `<td class="${sepOf(k, i)}">${fmtCell(k, r[k])}</td>`).join("") + `</tr>`;
+    const cls = [S.sel === r.id ? "sel" : "", r.__pin ? "pin" : ""].filter(Boolean).join(" ");
+    const mark = r.__pin ? `<span class="pinmark" title="置顶参照行：它本身不符合当前筛选条件">置顶</span>` : "";
+    html += `<tr data-id="${r.id}" class="${cls}">` +
+      cols.map((k, i) => `<td class="${sepOf(k, i)}">${i === 0 ? mark : ""}${fmtCell(k, r[k])}</td>`).join("") + `</tr>`;
   });
   html += `</tbody></table>`;
   wrap.innerHTML = html;
@@ -785,6 +944,10 @@ async function openDrawer(id) {
     row = await api("getRow", id);
     $("#dTitle").textContent = `记录 #${row.new_id || id}　详情`;
     S.editing = Object.assign({}, row);
+    /* 选中即置顶：以后筛选时它始终排第一行，方便拿它当参照 */
+    setPin(row);
+    pinToFrontLocal();
+    renderPinUI();
   } else {
     row = {}; S.editing = {};
     $("#dTitle").textContent = "新增记录";
@@ -1391,6 +1554,10 @@ on("#btnFoldQuick", e => {
 on("#btnSearch", () => { S.page = 1; refresh(); });
 $("#kw").onkeydown = e => { if (e.key === "Enter") { S.page = 1; refresh(); } };
 on("#btnCloseDrawer", closeDrawer);
+on("#btnPin", togglePin);
+on("#btnQuickFind", quickFindFromSel);
+on("#btnTol", cycleTol);
+renderTolUI();
 
 $("#btnSave").onclick = async () => {
   const data = collectForm();
