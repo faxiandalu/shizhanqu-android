@@ -119,7 +119,7 @@ jobs:
           echo "APK=$APK"
           AS=$(ls -d /usr/local/lib/android/sdk/build-tools/*/apksigner | head -1)
           if [ -n "$AS" ]; then
-            $AS verify --print-certs -verbose "$APK" 2>&1 | grep -iE "SHA1|SHA256|DN:|Verifies" | head -12
+            $AS verify --print-certs -verbose "$APK" 2>&1 | grep -iE "SHA-?1|SHA-?256|DN:|Verifies" | head -12
           else
             echo "没找到 apksigner，改看签名块"
             unzip -l "$APK" | grep -iE "META-INF" || echo "（无 META-INF，可能只签了 v2）"
