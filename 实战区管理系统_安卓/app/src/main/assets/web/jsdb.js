@@ -621,6 +621,133 @@
     return { total: total, inserted: inserted, updated: updated, unchanged: unchanged };
   }
 
+  /* ---------------- 「记录 / 复盘」专用小表 ----------------
+   *
+   * 手机上写完复盘要搬回电脑（或反过来），不必动 8 万行的整表：
+   * 导出一张只有「新ID + 比赛时间 + 竞彩场次 + 队伍 + 记录 + 复盘」的 CSV，
+   * 到对方的机器上按新ID 覆盖 record / review 两列即可。
+   *
+   * 铁律：applyTextCsv 只 UPDATE record / review，其余字段一律不动，也不新增/删除行。
+   */
+  var TEXT_PACK_KEYS = ["new_id", "match_time", "match_no", "teams", "record", "review"];
+
+  /** 导出：只包含写了「记录」或「复盘」的行 */
+  function exportTextCsv(filters) {
+    var w = buildWhere(filters);
+    var where = "(" + w.sql + ") AND ((record IS NOT NULL AND record<>'') OR (review IS NOT NULL AND review<>''))";
+    var sel = TEXT_PACK_KEYS.map(col).join(", ");
+    var parts = [TEXT_PACK_KEYS.map(function (k) { return csvCell(FIELD_MAP[k][1]); }).join(",")];
+    var total = 0, offset = 0, chunk = 5000;
+    while (true) {
+      var r = run("SELECT " + sel + " FROM matches WHERE " + where +
+        " ORDER BY id ASC LIMIT " + chunk + " OFFSET " + offset, w.params);
+      if (r.error) return { error: r.error };
+      if (!r.rows.length) break;
+      var lines = [];
+      for (var i = 0; i < r.rows.length; i++) {
+        var row = r.rows[i], cells = [];
+        for (var j = 0; j < TEXT_PACK_KEYS.length; j++) cells.push(csvCell(row[TEXT_PACK_KEYS[j]]));
+        lines.push(cells.join(","));
+      }
+      parts.push(lines.join("\r\n"));
+      total += r.rows.length;
+      offset += r.rows.length;
+      if (r.rows.length < chunk) break;
+    }
+    return { text: parts.join("\r\n"), count: total };
+  }
+
+  /** 导入覆盖：按新ID 定位，**只写 record / review 两列**
+   *  allowClear=false（默认）：表格里空的那一格不覆盖本机内容（只做覆盖，不清空）
+   */
+  function applyTextCsv(text, allowClear) {
+    text = String(text == null ? "" : text).replace(/^\uFEFF/, "");
+    var lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+    var body = [];
+    for (var i = 0; i < lines.length; i++) if (lines[i].trim() !== "") body.push(lines[i]);
+    if (body.length < 2) return { error: "这个 CSV 里没有数据行" };
+
+    var header = parseCsvLine(body[0]);
+    for (var h = 0; h < header.length; h++) header[h] = String(header[h] == null ? "" : header[h]).trim();
+
+    var idxId = -1, idxRec = -1, idxRev = -1;
+    for (var c = 0; c < header.length; c++) {
+      var hit = null;
+      for (var t = 0; t < TEXT_PACK_KEYS.length; t++) {
+        if (header[c] === FIELD_MAP[TEXT_PACK_KEYS[t]][1]) { hit = TEXT_PACK_KEYS[t]; break; }
+      }
+      if (hit === "new_id" && idxId < 0) idxId = c;
+      else if (hit === "record" && idxRec < 0) idxRec = c;
+      else if (hit === "review" && idxRev < 0) idxRev = c;
+    }
+    if (idxId < 0 && header.length >= 6) { idxId = 0; idxRec = 4; idxRev = 5; }
+    if (idxId < 0) return { error: "没找到「新ID」列，这不是记录 / 复盘专用表" };
+    if (idxRec < 0 && idxRev < 0) return { error: "没找到「记录」或「复盘」列，这不是记录 / 复盘专用表" };
+
+    // 一张 map 记住每个新ID 在表格里最后的值（重复出现以最后一次为准）
+    var want = [];              // 去重后的 new_id
+    var map = {};               // new_id -> {rec, rev}
+    var rows = 0, skipped = 0;
+    for (var b = 1; b < body.length; b++) {
+      rows++;
+      var cc = parseCsvLine(body[b]);
+      var raw = String(cc[idxId] == null ? "" : cc[idxId]).trim();
+      if (!raw) { skipped++; continue; }
+      var nid = parseInt(raw, 10);
+      if (isNaN(nid)) { skipped++; continue; }
+      var recs = idxRec >= 0 ? String(cc[idxRec] == null ? "" : cc[idxRec]).trim() : null;
+      var revs = idxRev >= 0 ? String(cc[idxRev] == null ? "" : cc[idxRev]).trim() : null;
+      if (recs !== null && recs.length > TEXT_MAXLEN) recs = recs.slice(0, TEXT_MAXLEN);
+      if (revs !== null && revs.length > TEXT_MAXLEN) revs = revs.slice(0, TEXT_MAXLEN);
+      if (map[nid] === undefined) want.push(nid);
+      map[nid] = { rec: recs, rev: revs };
+    }
+    if (!want.length) return { error: "表格里一行有效数据都没有" };
+
+    // 按批把库里对应的行取出来比对，只对真有变化的拼 UPDATE
+    var stamp = new Date().toISOString().slice(0, 19).replace("T", " ");
+    var matched = 0, updated = 0, unchanged = 0, cleared = 0, missing = 0;
+    var sqls = [];
+    for (var s = 0; s < want.length; s += 400) {
+      var part = want.slice(s, s + 400);
+      var qr = run("SELECT id, new_id, record, review FROM matches WHERE new_id IN (" +
+        part.join(",") + ")", []);
+      if (qr.error) return { error: qr.error };
+      var found = {};
+      for (var q = 0; q < qr.rows.length; q++) {
+        var rr = qr.rows[q];
+        found[rr.new_id] = {
+          id: rr.id,
+          record: (rr.record == null ? "" : String(rr.record)).replace(/^\s+|\s+$/g, ""),
+          review: (rr.review == null ? "" : String(rr.review)).replace(/^\s+|\s+$/g, "")
+        };
+      }
+      for (var p = 0; p < part.length; p++) {
+        var nid2 = part[p];
+        var cur = found[nid2];
+        if (!cur) { missing++; continue; }
+        matched++;
+        var src = map[nid2];
+        var oldRec = cur.record, oldRev = cur.review;
+        var newRec = oldRec, newRev = oldRev;
+        if (src.rec !== null) newRec = (!allowClear && !src.rec) ? oldRec : src.rec;
+        if (src.rev !== null) newRev = (!allowClear && !src.rev) ? oldRev : src.rev;
+        if (newRec === oldRec && newRev === oldRev) { unchanged++; continue; }
+        sqls.push("UPDATE matches SET record = " + lit(newRec) + ", review = " + lit(newRev) +
+          ", updated_at = '" + esc(stamp) + "' WHERE id = " + cur.id);
+        updated++;
+        if ((newRec === "" && oldRec !== "") || (newRev === "" && oldRev !== "")) cleared++;
+      }
+    }
+
+    if (sqls.length) {
+      var rb = runBatch(sqls);
+      if (rb.error) return { error: rb.error };
+    }
+    return { rows: rows, matched: matched, updated: updated, unchanged: unchanged,
+             cleared: cleared, missing: missing, skipped: skipped };
+  }
+
   /** 一行 CSV（支持引号包裹与 "" 转义） */
   function parseCsvLine(s) {
     var out = [], cur = "", inQ = false;
@@ -685,6 +812,8 @@
     FIELDS: FIELDS, FIELD_MAP: FIELD_MAP, ALL_KEYS: ALL_KEYS,
     ENUM_FIELDS: ENUM_FIELDS, SUGGEST_FIELDS: SUGGEST_FIELDS,
     TEXT_MAXLEN: TEXT_MAXLEN, TEXT_FIELDS_LIMITED: TEXT_FIELDS_LIMITED,
+    TEXT_PACK_KEYS: TEXT_PACK_KEYS,
+    exportTextCsv: exportTextCsv, applyTextCsv: applyTextCsv,
     setRunner: setRunner,
     buildWhere: buildWhere,
     query: query, getRow: getRow, updateRow: updateRow, insertRow: insertRow,
