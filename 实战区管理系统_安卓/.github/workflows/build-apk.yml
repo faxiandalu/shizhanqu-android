@@ -1,0 +1,124 @@
+name: 打包安卓APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch: {}
+  # 每月 1 号自动跑一次，主要是为了给签名钥匙的缓存"续命"
+  # （GitHub 会把 7 天没人碰的缓存清掉，钥匙没了签名就会变）
+  schedule:
+    - cron: '0 19 1 * *'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      - name: 装 JDK 17（Android 插件必须要 17，默认的 11 会失败）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ---------------------------------------------------------------
+      # 固定签名钥匙
+      # 每次编译机都是全新机器，默认的调试钥匙会重新生成 —— 签名一变，
+      # 手机就不让覆盖安装，必须先卸载，一卸载 App 数据全没了。
+      # 这里把钥匙缓存下来，之后每次编译都复用同一把，APK 就能直接覆盖装。
+      # 钥匙只存在 GitHub 的缓存里，不进仓库、不进产物（仓库是公开的）。
+      # ---------------------------------------------------------------
+      - name: 取缓存的签名钥匙
+        id: ks_cache
+        uses: actions/cache@v4
+        with:
+          path: .signing/szq.p12
+          key: szq-signing-key-v1
+
+      - name: 没有钥匙就生成一把（仅首次）
+        run: |
+          mkdir -p .signing
+          if [ ! -f .signing/szq.p12 ]; then
+            echo "首次运行，生成固定签名钥匙"
+            keytool -genkeypair -v \
+              -keystore .signing/szq.p12 \
+              -storetype PKCS12 \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -alias shizhanqu \
+              -storepass shizhanqu2026 -keypass shizhanqu2026 \
+              -dname "CN=shizhanqu, OU=app, O=shizhanqu, C=CN"
+          else
+            echo "用缓存里的固定钥匙，签名与上次一致"
+          fi
+          mkdir -p 实战区管理系统_安卓/app/keystore
+          cp .signing/szq.p12 实战区管理系统_安卓/app/keystore/szq.p12
+          keytool -list -v -keystore .signing/szq.p12 \
+            -storepass shizhanqu2026 -alias shizhanqu 2>/dev/null \
+            | grep -E "证书指纹|SHA1" | head -2 || true
+
+      # 不用 android-actions/setup-android：它会去装已废弃的 tools 包并崩溃。
+      # GitHub 服务器本身自带 Android SDK，直接指过去用。
+      - name: 指向自带的 Android SDK
+        run: |
+          SDK=/usr/local/lib/android/sdk
+          echo "ANDROID_HOME=$SDK" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=$SDK" >> $GITHUB_ENV
+          ls "$SDK"
+          echo "--- platforms ---"; ls "$SDK/platforms" || true
+          echo "--- build-tools ---"; ls "$SDK/build-tools" || true
+
+      - name: 补齐 SDK 组件（缺什么装什么）
+        run: |
+          SM=$(ls -d /usr/local/lib/android/sdk/cmdline-tools/*/bin/sdkmanager | head -1)
+          echo "sdkmanager=$SM"
+          yes | $SM --licenses > /dev/null 2>&1 || true
+          if [ ! -d /usr/local/lib/android/sdk/platforms/android-34 ]; then
+            $SM "platforms;android-34" 2>&1 | tail -3
+          else
+            echo "platforms;android-34 already installed"
+          fi
+          if [ ! -d /usr/local/lib/android/sdk/build-tools/34.0.0 ]; then
+            $SM "build-tools;34.0.0" 2>&1 | tail -3
+          else
+            echo "build-tools;34.0.0 already installed"
+          fi
+
+      - name: 准备 Gradle 8.2
+        run: |
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            echo "用工程自带的 gradlew"
+          else
+            echo "工程没有 gradlew，云端装一份 Gradle 8.2"
+            curl -sSL -o /tmp/gradle.zip https://services.gradle.org/distributions/gradle-8.2-bin.zip
+            sudo unzip -q -o /tmp/gradle.zip -d /opt
+            sudo ln -sfn /opt/gradle-8.2 /opt/gradle
+            echo "/opt/gradle/bin" >> $GITHUB_PATH
+          fi
+
+      - name: 确认环境
+        run: |
+          java -version 2>&1 | head -2
+          echo "JAVA_HOME=$JAVA_HOME"
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platforms" || true
+          ls "$ANDROID_HOME/build-tools" || true
+          (gradle -v 2>&1 | head -6) || true
+
+      # 源码在 实战区管理系统_安卓/ 子目录里，Gradle 必须在那一层执行
+      - name: 编译 APK（调试签名，装上就能用）
+        working-directory: 实战区管理系统_安卓
+        run: |
+          if [ -f gradlew ]; then
+            ./gradlew assembleDebug --no-daemon
+          else
+            gradle assembleDebug --no-daemon
+          fi
+
+      - name: 传出 APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: 入库实战区APK
+          path: 实战区管理系统_安卓/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
