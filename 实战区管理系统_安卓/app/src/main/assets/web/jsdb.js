@@ -377,6 +377,72 @@
   FIELDS.forEach(function (f) { LABEL_MAP[f[1]] = f[0]; });
   var impSeq = 0;
 
+  /* ------------------------------------------------------------------
+   * 表头容错（与电脑版 db.py 的 _map_header 同一套规则）
+   * 数据源每次重新导出列名都可能变：2026-10-11 那版把「尾胜/尾平/尾负」和
+   * 「初胜/初平/初负」统统改叫「胜/平/负」，半全场赔率加了「（初）」后缀。
+   * 只看列名的话这几列会整列丢失，所以做两层兜底。
+   * ------------------------------------------------------------------ */
+  var HDR_SUFFIX = ["（初）", "（终）", "（即时）", "（完）", "(初)", "(终)", "(即时)", "(完)"];
+  var ALIAS = {
+    "终胜": "w_win", "终平": "w_draw", "终负": "w_lose",
+    "尾盘胜": "w_win", "尾盘平": "w_draw", "尾盘负": "w_lose",
+    "让球胜": "s_h_win", "让球平": "s_h_draw", "让球负": "s_h_lose"
+  };
+
+  /** 去空白 + 反复去掉版本后缀 */
+  function normHeader(h) {
+    h = String(h == null ? "" : h).trim();
+    var changed = true;
+    while (changed) {
+      changed = false;
+      for (var i = 0; i < HDR_SUFFIX.length; i++) {
+        var s = HDR_SUFFIX[i];
+        if (h.length > s.length && h.substring(h.length - s.length) === s) {
+          h = h.substring(0, h.length - s.length).trim();
+          changed = true;
+        }
+      }
+    }
+    return h;
+  }
+
+  /**
+   * 表头 → 每个字段在第几列。
+   * 1) 按列名匹配（原名 → 去后缀 → 别名）
+   * 2) 认不出来的按「标准列序」同位置兜底（前提是该标准 key 没被别的列占用）
+   * 新版表里两组赔率都叫「胜/平/负」，重名没法靠名字分，正靠第 2 层按位置分开。
+   * 返回 { pos: [列号或 -1, ...]（按 ALL_KEYS 顺序）, unknown: [没认出的列名] }
+   */
+  function mapHeader(header) {
+    var n = header.length, i;
+    var keys = new Array(n), used = {}, unknown = [];
+    for (i = 0; i < n; i++) keys[i] = null;
+    for (i = 0; i < n; i++) {
+      var h = String(header[i] == null ? "" : header[i]).trim();
+      var nh = normHeader(h);
+      var k = LABEL_MAP[h] || LABEL_MAP[nh] || ALIAS[h] || ALIAS[nh];
+      if (k && !used[k]) { keys[i] = k; used[k] = 1; }
+    }
+    var named = 0;
+    for (i = 0; i < n; i++) if (keys[i]) named++;
+    if (named >= 10) {                       // 认出的够多才敢按位置配，免得拿陌生表乱点鸳鸯
+      for (i = 0; i < n; i++) {
+        if (keys[i]) continue;
+        if (i < ALL_KEYS.length) {
+          var std = ALL_KEYS[i];
+          if (!used[std]) { keys[i] = std; used[std] = 1; }
+        }
+      }
+    }
+    for (i = 0; i < n; i++) if (!keys[i] && String(header[i] == null ? "" : header[i]).trim()) unknown.push(String(header[i]).trim());
+    var pos = ALL_KEYS.map(function (k) {
+      for (var j = 0; j < n; j++) if (keys[j] === k) return j;
+      return -1;
+    });
+    return { pos: pos, unknown: unknown, keys: keys };
+  }
+
   /** 一批 SQL 放进一个事务里跑（安卓桥提供 execBatch；测试环境退化成逐条执行） */
   function runBatch(sqls) {
     if (!sqls || !sqls.length) return { ok: true, count: 0 };
@@ -621,6 +687,7 @@
     groupCount: groupCount, distinct: distinct, distinctMulti: distinctMulti,
     stats: stats, exportCsv: exportCsv,
     LABEL_MAP: LABEL_MAP,
+    mapHeader: mapHeader,
     parseCsvLine: parseCsvLine,
     beginImport: beginImport, pushImportRows: pushImportRows,
     finishImport: finishImport, cancelImport: cancelImport
