@@ -45,7 +45,10 @@
     ["dl", "平负", "real", "赔率"],
     ["lw", "负胜", "real", "赔率"],
     ["ld", "负平", "real", "赔率"],
-    ["ll", "负负", "real", "赔率"]
+    ["ll", "负负", "real", "赔率"],
+    // 首推 / 次推：程序按公式算出来的，放在最后（别插中间，会打乱表头位置兜底）
+    ["first_push", "首推", "text", "推荐"],
+    ["second_push", "次推", "text", "推荐"]
   ];
   var FIELD_MAP = {};
   FIELDS.forEach(function (f) { FIELD_MAP[f[0]] = f; });
@@ -53,6 +56,22 @@
   var ENUM_FIELDS = ["status", "half", "full", "half_full", "handicap_result", "handicap", "ou"];
   var SUGGEST_FIELDS = ["league", "match_no"];
   var TEXT_FIELDS_LIMITED = ["record", "review"];
+
+  /* ---------------- 首推 / 次推 ----------------
+   *
+   * 和电脑版 db.py 完全同一套公式：以本行自己为基准去历史库找同型样本，
+   *   wl / lw        固定值，精确等于本条
+   *   s_h_win / s_h_lose  本条 ±0.02（首推）/ ±0.03（次推）
+   * 统计出各结果得了几票，写到 first_push / second_push 两列里。
+   */
+  var PUSH_FIELDS = ["first_push", "second_push"];
+  var PUSH_TOL = { first_push: 0.02, second_push: 0.03 };
+  var PUSH_MAX_SEL = 30;
+  // 只有这些算有效赛果；「无效场次」「取消」「--」「空」统统不算样本
+  var VALID_FULL = ["胜", "平", "负"];
+  var VALID_HANDICAP = ["让胜", "让平", "让负"];
+  var FULL_ORDER = ["胜", "平", "负"];
+  var HANDICAP_ORDER = ["让胜", "让平", "让负"];
 
   function col(k) { return '"' + k + '"'; }
 
@@ -535,8 +554,13 @@
     }
     return "(" + a + " IS " + b + ")";
   }
+  /** 比对「两边是否一样」时用的字段。
+   *  首推 / 次推 不参与比对：这两列是程序算出来的，Excel / CSV 里根本没有，
+   *  读进来一定是空。要是拿它去比，每一行都会被判成「有变化」，
+   *  然后 DELETE + INSERT 一通，算好的值就被空值冲掉了。 */
+  var CMP_KEYS = ALL_KEYS.filter(function (k) { return PUSH_FIELDS.indexOf(k) < 0; });
   function sameCond() {
-    return ALL_KEYS.map(sameExpr).join(" AND ");
+    return CMP_KEYS.map(sameExpr).join(" AND ");
   }
   /** 注意：SQL 里 NOT 比 AND 优先，整串必须再套一层括号 */
   function diffCond() {
@@ -576,6 +600,17 @@
         selSql + ", '" + stamp + "', t.src_row FROM imp_tmp t");
       inserted = total;
     } else {
+      // 首推 / 次推 只由程序写入，表格里没有这两列。
+      // 无条件把库里原有的值填回 imp_tmp，保证后面 DELETE + INSERT 之后它们还在。
+      // （跟 record / 复盘 不同：那两列只在勾了「保留」时才回填，这两列无条件保留）
+      for (var pi = 0; pi < PUSH_FIELDS.length; pi++) {
+        var pk = PUSH_FIELDS[pi], pc = col(pk);
+        var pu = runChange("UPDATE imp_tmp SET " + pc + " = " +
+          "(SELECT m." + pc + " FROM matches m WHERE m.\"new_id\" = imp_tmp.\"new_id\") " +
+          "WHERE EXISTS (SELECT 1 FROM matches m WHERE m.\"new_id\" = imp_tmp.\"new_id\")", []);
+        if (pu && pu.error) return { error: pu.error };
+      }
+
       // 保留库里已有的「记录/复盘」：导入里这两列是空白的，就先把库里的值填回来。
       // 填完之后再用统一的比对规则，就自然等价于电脑版的 keep_text 逻辑了。
       if (keep) {
@@ -808,11 +843,226 @@
     return { text: parts.join("\r\n"), count: total };
   }
 
+  /* ==================== 首推 / 次推 ==================== */
+
+  /** 老库（还没在电脑上跑过新版的那些）没有这两列，先补上。
+   *  手机上用的库是电脑导过来的，电脑那边 ALTER 过了这里就不用动。 */
+  function ensurePushColumns() {
+    var r = run("PRAGMA table_info(matches)", []);
+    if (r.error) return { error: r.error };
+    var have = {};
+    for (var i = 0; i < r.rows.length; i++) have[String(r.rows[i].name)] = true;
+    var added = [];
+    for (var p = 0; p < PUSH_FIELDS.length; p++) {
+      var k = PUSH_FIELDS[p];
+      if (have[k]) continue;
+      var ra = runChange("ALTER TABLE matches ADD COLUMN " + col(k) + " TEXT", []);
+      if (ra && ra.error) return { error: ra.error };
+      added.push(k);
+    }
+    // 公式要按 wl / lw 精确比对，没索引的话几万行就得全表扫
+    for (var q = 0; q < 2; q++) {
+      var kk = q === 0 ? "wl" : "lw";
+      var ri = runChange("CREATE INDEX IF NOT EXISTS idx_" + kk + " ON matches(" + col(kk) + ")", []);
+      if (ri && ri.error) return { error: ri.error };
+    }
+    return { ok: true, added: added };
+  }
+
+  function r4(x) { return Math.round(x * 10000) / 10000; }
+  function trimStr(v) { return String(v === null || v === undefined ? "" : v).replace(/^\s+|\s+$/g, ""); }
+
+  /** 把一块（全 或 让盘）的票数拼成文本，例如 胜5、平3。凑齐 3 种 → 返回空串 */
+  function fmtPart(cnt, order) {
+    var keys = [];
+    for (var i = 0; i < order.length; i++) if (cnt[order[i]]) keys.push(order[i]);
+    if (keys.length >= 3) return "";
+    // 票多的排前面；票一样多按固定顺序写，保证同一份数据每次算出来都一样
+    keys.sort(function (a, b) {
+      if (cnt[b] !== cnt[a]) return cnt[b] - cnt[a];
+      return order.indexOf(a) - order.indexOf(b);
+    });
+    var out = [];
+    for (var j = 0; j < keys.length; j++) out.push(keys[j] + cnt[keys[j]]);
+    return out.join("、");
+  }
+
+  /** 拼成单元格文本：两块之间「；」，同一块多项「、」，每项带票数
+   *  零命中 → 「—」（跟"还没算过"的真空白区分开） */
+  function fmtPush(fcnt, hcnt, n) {
+    var empty = true;
+    for (var k in fcnt) { if (fcnt[k]) { empty = false; break; } }
+    if (empty) { for (var k2 in hcnt) { if (hcnt[k2]) { empty = false; break; } } }
+    if (n <= 0 || empty) return "—";
+    var fs = fmtPart(fcnt, FULL_ORDER), hs = fmtPart(hcnt, HANDICAP_ORDER);
+    var parts = [];
+    if (fs) parts.push(fs);
+    if (hs) parts.push(hs);
+    return parts.join("；");
+  }
+
+  /** 对选中的行跑公式并写回数据库
+   *  exclude: 不参与统计的行 id，默认就是本次这批（自己不算自己，同批也不互相算）
+   *  返回 { field, tol, items:[{id,new_id,text,n,fcnt,hcnt,fulls,hds}], updated, skipped } */
+  function computePush(ids, field, exclude) {
+    field = field || "first_push";
+    if (PUSH_FIELDS.indexOf(field) < 0) return { error: "field 只能是 first_push 或 second_push" };
+    var tol = PUSH_TOL[field];
+
+    var idList = [];
+    var arr = ids || [];
+    for (var i = 0; i < arr.length; i++) {
+      var v = parseInt(arr[i], 10);
+      if (!isNaN(v)) idList.push(v);
+    }
+    if (!idList.length) {
+      return { field: field, tol: tol, items: [], updated: 0, skipped: [], truncated: false };
+    }
+    var truncated = idList.length > PUSH_MAX_SEL;
+    if (truncated) idList = idList.slice(0, PUSH_MAX_SEL);
+
+    var excl;
+    if (exclude === undefined || exclude === null) {
+      excl = idList.slice();
+    } else {
+      excl = [];
+      for (var e = 0; e < exclude.length; e++) {
+        var ev = parseInt(exclude[e], 10);
+        if (!isNaN(ev)) excl.push(ev);
+      }
+    }
+    var exclSql = excl.length
+      ? " AND id NOT IN (" + excl.map(function () { return "?"; }).join(",") + ")"
+      : "";
+
+    var stamp = now();
+    var items = [], skipped = [], sqls = [];
+
+    for (var j = 0; j < idList.length; j++) {
+      var rid = idList[j];
+      var rr = run("SELECT id, new_id, wl, lw, s_h_win, s_h_lose FROM matches WHERE id=?", [rid]);
+      if (rr.error) return { error: rr.error };
+      if (!rr.rows.length) { skipped.push({ id: rid, reason: "库里已经没有这一条了" }); continue; }
+      var row = rr.rows[0];
+
+      var text = "—", n = 0, fcnt = {}, hcnt = {}, fulls = [], hds = [];
+      if (row.wl === null || row.wl === undefined || row.lw === null || row.lw === undefined ||
+          row.s_h_win === null || row.s_h_win === undefined ||
+          row.s_h_lose === null || row.s_h_lose === undefined) {
+        // 赔率缺一块就没法比，直接写「—」，不去猜
+        text = "—";
+      } else {
+        var loW = r4(row.s_h_win - tol), hiW = r4(row.s_h_win + tol);
+        var loL = r4(row.s_h_lose - tol), hiL = r4(row.s_h_lose + tol);
+        var qr = run("SELECT full, handicap_result FROM matches " +
+          "WHERE wl=? AND lw=? AND s_h_win BETWEEN ? AND ? AND s_h_lose BETWEEN ? AND ? " +
+          "AND full IN (?,?,?)" + exclSql,
+          [row.wl, row.lw, loW, hiW, loL, hiL].concat(VALID_FULL).concat(excl));
+        if (qr.error) return { error: qr.error };
+        for (var t = 0; t < qr.rows.length; t++) {
+          n++;
+          var f = trimStr(qr.rows[t].full);
+          var h = trimStr(qr.rows[t].handicap_result);
+          if (VALID_FULL.indexOf(f) >= 0) fcnt[f] = (fcnt[f] || 0) + 1;
+          if (VALID_HANDICAP.indexOf(h) >= 0) hcnt[h] = (hcnt[h] || 0) + 1;
+        }
+        for (var a = 0; a < FULL_ORDER.length; a++) if (fcnt[FULL_ORDER[a]]) fulls.push(FULL_ORDER[a]);
+        for (var b = 0; b < HANDICAP_ORDER.length; b++) if (hcnt[HANDICAP_ORDER[b]]) hds.push(HANDICAP_ORDER[b]);
+        text = fmtPush(fcnt, hcnt, n);
+      }
+
+      sqls.push("UPDATE matches SET " + col(field) + " = " + lit(text) +
+        ", updated_at = '" + esc(stamp) + "' WHERE id = " + rid);
+      items.push({ id: rid, new_id: row.new_id, text: text, n: n,
+                   fcnt: fcnt, hcnt: hcnt, fulls: fulls, hds: hds });
+    }
+
+    if (sqls.length) {
+      var rb = runBatch(sqls);
+      if (rb.error) return { error: rb.error };
+    }
+    return { field: field, tol: tol, items: items, updated: items.length,
+             skipped: skipped, truncated: truncated };
+  }
+
+  /** 旧格式（结果里没有票数）升级成带票数的新格式。
+   *  票数当时没存库，反推不出来，只能拿赔率重算一遍。
+   *  只动「非空、不是 —、且里面一个数字都没有」的格子。 */
+  function recalcPushTexts() {
+    var done = { first_push: 0, second_push: 0 };
+    var r = run("SELECT id, first_push, second_push FROM matches", []);
+    if (r.error) return { error: r.error };
+    var todo = {}, all = {}, i, k, v;
+    for (i = 0; i < r.rows.length; i++) {
+      for (var p = 0; p < PUSH_FIELDS.length; p++) {
+        k = PUSH_FIELDS[p];
+        v = trimStr(r.rows[i][k]);
+        if (v && v !== "—" && !/\d/.test(v)) {
+          if (!todo[k]) todo[k] = [];
+          todo[k].push(r.rows[i].id);
+          all[r.rows[i].id] = true;
+        }
+      }
+    }
+    var keys = [];
+    for (k in todo) keys.push(k);
+    if (!keys.length) return done;
+
+    // 这批行彼此当作「同批勾选」，统计时互相排除，跟当初手点时保持一致
+    var allIds = [];
+    for (var id in all) allIds.push(parseInt(id, 10));
+
+    var stamp = now(), sqls = [];
+    for (var q = 0; q < keys.length; q++) {
+      var field = keys[q];
+      var tol = PUSH_TOL[field];
+      var list = todo[field];
+      var exclSql = " AND id NOT IN (" + allIds.map(function () { return "?"; }).join(",") + ")";
+      for (i = 0; i < list.length; i++) {
+        var rr = run("SELECT id, wl, lw, s_h_win, s_h_lose FROM matches WHERE id=?", [list[i]]);
+        if (rr.error) return { error: rr.error };
+        if (!rr.rows.length) continue;
+        var row = rr.rows[0];
+        var text = "—", n = 0, fcnt = {}, hcnt = {};
+        if (!(row.wl === null || row.wl === undefined || row.lw === null || row.lw === undefined ||
+              row.s_h_win === null || row.s_h_win === undefined ||
+              row.s_h_lose === null || row.s_h_lose === undefined)) {
+          var loW = r4(row.s_h_win - tol), hiW = r4(row.s_h_win + tol);
+          var loL = r4(row.s_h_lose - tol), hiL = r4(row.s_h_lose + tol);
+          var qr = run("SELECT full, handicap_result FROM matches " +
+            "WHERE wl=? AND lw=? AND s_h_win BETWEEN ? AND ? AND s_h_lose BETWEEN ? AND ? " +
+            "AND full IN (?,?,?)" + exclSql,
+            [row.wl, row.lw, loW, hiW, loL, hiL].concat(VALID_FULL).concat(allIds));
+          if (qr.error) return { error: qr.error };
+          for (var t = 0; t < qr.rows.length; t++) {
+            n++;
+            var f = trimStr(qr.rows[t].full);
+            var h = trimStr(qr.rows[t].handicap_result);
+            if (VALID_FULL.indexOf(f) >= 0) fcnt[f] = (fcnt[f] || 0) + 1;
+            if (VALID_HANDICAP.indexOf(h) >= 0) hcnt[h] = (hcnt[h] || 0) + 1;
+          }
+          text = fmtPush(fcnt, hcnt, n);
+        }
+        sqls.push("UPDATE matches SET " + col(field) + " = " + lit(text) +
+          ", updated_at = '" + esc(stamp) + "' WHERE id = " + list[i]);
+        done[field]++;
+      }
+    }
+    if (sqls.length) {
+      var rb = runBatch(sqls);
+      if (rb.error) return { error: rb.error };
+    }
+    return done;
+  }
+
   global.JSDB = {
     FIELDS: FIELDS, FIELD_MAP: FIELD_MAP, ALL_KEYS: ALL_KEYS,
     ENUM_FIELDS: ENUM_FIELDS, SUGGEST_FIELDS: SUGGEST_FIELDS,
     TEXT_MAXLEN: TEXT_MAXLEN, TEXT_FIELDS_LIMITED: TEXT_FIELDS_LIMITED,
     TEXT_PACK_KEYS: TEXT_PACK_KEYS,
+    PUSH_FIELDS: PUSH_FIELDS, PUSH_TOL: PUSH_TOL, PUSH_MAX_SEL: PUSH_MAX_SEL,
+    ensurePushColumns: ensurePushColumns,
+    computePush: computePush, recalcPushTexts: recalcPushTexts,
     exportTextCsv: exportTextCsv, applyTextCsv: applyTextCsv,
     setRunner: setRunner,
     buildWhere: buildWhere,
