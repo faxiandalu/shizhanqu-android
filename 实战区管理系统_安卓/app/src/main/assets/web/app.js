@@ -1152,7 +1152,14 @@ function exportMobile() {
           <label><input type="radio" name="scope" value="all"> 全部数据（${S.stats.total ?? 0} 条）</label>
         </div>
       </div>
-      <div class="hint">导出为 CSV，Excel 可直接打开。点「开始导出」后会弹出保存位置的选择框。<br>
+      <div class="mrow">
+        <label>导出内容</label>
+        <div class="radio-col">
+          <label><input type="radio" name="kind" value="all" checked> 全部字段（${(window.JSDB.FIELDS || []).length} 列，给电脑当数据源那种）</label>
+          <label><input type="radio" name="kind" value="text"> <b>只导「记录 / 复盘」</b>（${S.stats.has_record ?? 0} 条记录、${S.stats.has_review ?? 0} 条复盘）—— 一张 6 列的小表，搬到别的机器上覆盖用</label>
+        </div>
+      </div>
+      <div class="hint" id="expHint">导出为 CSV，Excel 可直接打开。点「开始导出」后会弹出保存位置的选择框。<br>
         数据量大时（几万行）会稍慢几秒，属正常。</div>
     </div>
     <div class="mfoot">
@@ -1162,19 +1169,24 @@ function exportMobile() {
   on("#expCancel", closeModal);
   on("#expGo", async () => {
     const scope = $('input[name="scope"]:checked').value;
+    const kind = ($('input[name="kind"]:checked') || {}).value || "all";
     closeModal();
     busy(true, "正在生成 CSV…");
     await sleep(30);
     try {
       const filters = scope === "all" ? [] : currentFilters();
-      const r = window.JSDB.exportCsv(filters, S.sort, 0);
+      const r = kind === "text"
+        ? window.JSDB.exportTextCsv(filters)
+        : window.JSDB.exportCsv(filters, S.sort, 0);
       if (r.error) throw new Error(r.error);
-      if (!r.count) { busy(false); toast("没有可导出的数据", { err: true }); return; }
+      if (!r.count) { busy(false); toast(kind === "text" ? "还没写过「记录」或「复盘」，没有可导的" : "没有可导出的数据", { err: true }); return; }
       const d = new Date(), p = n => (n < 10 ? "0" : "") + n;
       const ts = "" + d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "_" + p(d.getHours()) + p(d.getMinutes());
       busy(false);
-      window.MB.saveText(`实战区导出_${ts}.csv`, r.text);
-      toast(`已生成 ${r.count} 行，请在弹出的保存框里选个位置`);
+      window.MB.saveText(kind === "text" ? `记录复盘_${ts}.csv` : `实战区导出_${ts}.csv`, r.text);
+      toast(kind === "text"
+        ? `已生成 ${r.count} 行记录 / 复盘，请在弹出的保存框里选个位置。\n传到电脑后，电脑端「数据同步 → 只搬记录 / 复盘」选它就能覆盖过去`
+        : `已生成 ${r.count} 行，请在弹出的保存框里选个位置`);
     } catch (e) {
       busy(false);
       toast("导出失败：" + e.message, { err: true });
@@ -1408,10 +1420,15 @@ function openDbPanel(first) {
  */
 function importMobile() {
   openModal(`
-    <h3>导入 Excel 表格</h3>
+    <h3>导入数据</h3>
     <div class="mbody">
       <div class="mrow">
-        <label>导入方式</label>
+        <button class="btn" id="gotoText" style="width:100%">📝 只搬「记录 / 复盘」（小 CSV，覆盖本机）</button>
+        <div style="margin-top:6px;font-size:11.5px;color:var(--text-2)">电脑上导出那张 6 列小表，传到手机后走这里 —— 只改这两列，其它数据不动。</div>
+      </div>
+      <hr style="border:none;border-top:1px solid var(--border);margin:10px 0">
+      <div class="mrow">
+        <label>整表导入（Excel / 完整 CSV）</label>
         <div class="radio-col">
           <label><input type="radio" name="mode" value="update" checked> <b>按新ID更新（推荐）</b>：新ID 已存在的，内容有变化就覆盖、没变化就保留；新ID 没有的，新增</label>
           <label><input type="radio" name="mode" value="replace"> 覆盖重建：清空全部数据后重新导入（会丢掉已写的 记录 / 复盘）</label>
@@ -1432,6 +1449,7 @@ function importMobile() {
       <button class="btn primary" id="impPick">选择 Excel 文件</button>
     </div>`);
   on("#impCancel", closeModal);
+  on("#gotoText", importTextMobile);
   on("#impPick", () => {
     window.__impOpts = {
       mode: ($('input[name="mode"]:checked') || {}).value || "update",
@@ -1446,6 +1464,75 @@ function impBar(pct, text) {
   const b = $("#impBar"); if (b) b.querySelector("i").style.width = Math.max(0, Math.min(100, pct)) + "%";
   const t = $("#impText"); if (t) t.textContent = text || "";
 }
+
+/* ---------------- 手机：只搬「记录 / 复盘」 ----------------
+ * 电脑上导出那张 6 列小 CSV -> 传手机 -> 这里选中它 -> 按新ID 覆盖 record / review。
+ * 只写这两列，其余字段一概不动，也不会新增 / 删除行。
+ */
+function importTextMobile() {
+  const st = S.stats || {};
+  openModal(`
+    <h3>只搬「记录 / 复盘」</h3>
+    <div class="mbody">
+      <div class="hint" style="margin-bottom:10px">
+        本机已写记录 <b>${st.has_record ?? 0}</b> 条、复盘 <b>${st.has_review ?? 0}</b> 条。<br>
+        选一张从别处导出的「记录 / 复盘」小表（列名：新ID、比赛时间、竞彩场次、主队（让球）vs客队、记录、复盘），
+        按 <b>新ID</b> 覆盖过去。
+      </div>
+      <div class="mrow">
+        <label>覆盖方式</label>
+        <div class="radio-col">
+          <label><input type="radio" name="tt" value="cover" checked> <b>覆盖（推荐）</b>：表格里有内容的那格写进来；表格里空的保留本机原文</label>
+          <label><input type="radio" name="tt" value="clear"> 严格对齐：空格也写，等于可以清掉本机内容</label>
+        </div>
+      </div>
+      <div class="hint">
+        <b>只改「记录」和「复盘」两列</b>，赔率比分这些一概不动。库里没有的新ID会跳过。
+      </div>
+      <div class="progress" id="impBar"><i></i></div>
+      <div id="impText" style="font-size:12px;color:var(--text-2);margin-top:6px"></div>
+    </div>
+    <div class="mfoot">
+      <button class="btn" id="ttCancel">取消</button>
+      <button class="btn primary" id="ttPick">选择 CSV 文件</button>
+    </div>`);
+  on("#ttCancel", closeModal);
+  on("#ttPick", () => {
+    window.__txtOpts = { allowClear: ($('input[name="tt"]:checked') || {}).value === "clear" };
+    impBar(5, "正在打开系统文件选择器…");
+    MB.pickText();
+  });
+}
+
+/** Java 读完文本文件后回调 */
+window.__onTextReady = async function (ok, msg, len) {
+  if (!ok) {
+    impBar(0, /取消/.test(msg || "") ? "已取消" : "");
+    if (!/取消/.test(msg || "")) toast("读取失败：" + msg, { err: true });
+    return;
+  }
+  if (!MB.ready()) { toast("数据库还没加载，先点「数据」选一下 db 文件", { err: true }); return; }
+  impBar(40, `已读取 ${(len / 1024).toFixed(0)} KB，正在比对…`);
+  await sleep(30);
+  try {
+    const text = MB.readPickedText();
+    const opt = window.__txtOpts || { allowClear: false };
+    const r = JSDB.applyTextCsv(text, opt.allowClear);
+    if (r.error) throw new Error(r.error);
+    impBar(100, "完成");
+    closeModal();
+    toast(`覆盖完成：读到 ${r.rows ?? 0} 行，库里对上 ${r.matched ?? 0} 条，实际写入 <b>${r.updated ?? 0}</b> 条` +
+      (r.cleared ? `（其中清空 ${r.cleared} 条）` : "") +
+      `，内容一样不用动 ${r.unchanged ?? 0} 条，库里没这个新ID ${r.missing ?? 0} 条`);
+    await loadStats();
+    buildQuickPanel();
+    S.page = 1;
+    await refresh({ force: true });
+  } catch (e) {
+    impBar(0, "");
+    toast("覆盖失败：" + (e.message || e), { err: true });
+  }
+};
 
 async function runMobileImport(opt) {
   const A = window.Android;
