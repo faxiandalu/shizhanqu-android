@@ -38,6 +38,9 @@ public class DbBridge {
     private volatile String pendingText;
     private volatile String pendingName;
 
+    /** pickText 选完之后暂存在内存里的文本 */
+    private volatile String pickedText;
+
     // 导入 Excel 用：转成 CSV 放在内部目录，网页分批读取
     private volatile File csvFile;
     private volatile ArrayList<Long> csvOffsets;
@@ -548,6 +551,72 @@ public class DbBridge {
         return offs;
     }
 
+    /** 一步到位的「记录 / 复盘」导入：网页发起选择器，选完直接把文本读进内存回调给网页。
+     *  这条链路和下面 pickText/readPickedText 是同一件事的两种写法，保留两个入口方便调试。 */
+    @JavascriptInterface
+    public void pickRecRevCsv() {
+        main.post(new Runnable() {
+            @Override
+            public void run() {
+                ((MainActivity) act).pickTextFile("text/csv");
+            }
+        });
+    }
+
+    /** 弹系统文件选择器，挑一个小文本文件（记录 / 复盘专用 CSV） */
+    @JavascriptInterface
+    public void pickText() {
+        pickRecRevCsv();
+    }
+
+    /** 上面选完文件后由 Activity 调用：读成字符串放到内存里再通知网页 */
+    public void readTextToMemory(final Uri uri) {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    long size = 0;
+                    android.database.Cursor c = act.getContentResolver().query(uri, null, null, null, null);
+                    if (c != null) {
+                        int i = c.getColumnIndex(android.provider.OpenableColumns.SIZE);
+                        if (c.moveToFirst() && i >= 0) size = c.getLong(i);
+                        c.close();
+                    }
+                    // 记录 / 复盘表一般就几百 KB；超过 12MB 就不当它了，别撑爆内存
+                    if (size > 12L * 1024 * 1024) {
+                        throw new Exception("这个文件有 " + (size / 1024 / 1024) + "MB，不像是记录 / 复盘表");
+                    }
+                    InputStream in = act.getContentResolver().openInputStream(uri);
+                    if (in == null) throw new Exception("读不到这个文件");
+                    java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+                    in.close();
+                    String txt = new String(bos.toByteArray(), "UTF-8");
+                    pickedText = txt;
+                    notifyText(true, "已读取", txt.length());
+                } catch (Exception e) {
+                    pickedText = null;
+                    notifyText(false, "读取失败：" + e.getMessage(), 0);
+                }
+            }
+        }).start();
+    }
+
+    /** 网页把上面读到的文本取走；用完清掉，省内存 */
+    @JavascriptInterface
+    public String readPickedText() {
+        String t = pickedText;
+        pickedText = null;
+        return t == null ? "" : t;
+    }
+
+    @JavascriptInterface
+    public int pickedTextLen() {
+        return pickedText == null ? 0 : pickedText.length();
+    }
+
     // ---------------- 导出文件 ----------------
 
     /** 先收下要写的内容，再去问用户存到哪 */
@@ -614,6 +683,11 @@ public class DbBridge {
 
     void notifyImportProgress(final int rows) {
         callJs("window.__onImportProgress&&window.__onImportProgress(" + rows + ")");
+    }
+
+    /** 文本文件选好并把内容读进内存后回调 */
+    void notifyText(final boolean ok, final String msg, final int len) {
+        callJs("window.__onTextReady&&window.__onTextReady(" + (ok ? "true" : "false") + "," + q(msg) + "," + len + ")");
     }
 
     private void callJs(final String js) {
