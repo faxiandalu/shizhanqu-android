@@ -20,6 +20,10 @@
     reloadDb: function () { A.reloadDb(); },
     /* 导入 Excel：弹出系统文件选择器 -> 转成 CSV -> 网页分批读进来 */
     pickXlsx: function () { try { A.pickXlsx(); } catch (e) { } },
+    /* 「记录 / 复盘」专用：选一个小 CSV，Java 读成文本后回调 __onTextReady */
+    pickText: function () { try { A.pickText(); } catch (e) { } },
+    readPickedText: function () { try { return A.readPickedText(); } catch (e) { return ""; } },
+    pickedTextLen: function () { try { return A.pickedTextLen(); } catch (e) { return 0; } },
     importCsvRows: function () { try { return A.importCsvRows(); } catch (e) { return 0; } },
     readImportLines: function (from, count) {
       try { return A.readImportLines(from, count); } catch (e) { return ""; }
