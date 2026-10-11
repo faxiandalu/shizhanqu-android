@@ -9,15 +9,17 @@ const DEFAULT_COLS = ["new_id", "match_time", "match_no", "league", "teams",
   "s_h_win", "s_h_draw", "s_h_lose",
   "wl", "lw",
   "half_score", "full_score", "half", "full", "half_full", "ou",
-  "handicap_result", "status", "first_push", "second_push", "record", "review"];
+  "handicap_result", "status", "strong_push", "first_push", "second_push", "record", "review"];
 /* 这三组赔率列左侧画一条分割线：初胜组 / 初让胜组 / 胜负组 */
+const COLS_KEY = "szq_cols_v4";   // v4：多了强推一列（顺序 强推 → 首推 → 次推）
+const COLS_KEY_OLD = "szq_cols_v3";
 const SEP_COLS = ["s_win", "s_h_win", "wl"];
-const COLS_KEY = "szq_cols_v3";   // v3：多了首推 / 次推两列
-const COLS_KEY_OLD = "szq_cols_v2";
-/* 首推 / 次推：勾若干行 → 点按钮 → 按公式筛历史样本，结果写进这两列并存盘 */
-const PUSH_FIELDS = ["first_push", "second_push"];
-const PUSH_LABEL = { first_push: "首推", second_push: "次推" };
-const PUSH_TOL = { first_push: 0.02, second_push: 0.03 };
+/* 强推 / 首推 / 次推：勾若干行 → 点按钮 → 按公式筛历史样本，结果写进对应列并存盘
+   顺序 = 表格里从左到右的显示顺序，三档只差「初让胜 / 初让负」的浮动范围 */
+const PUSH_FIELDS = ["strong_push", "first_push", "second_push"];
+const PUSH_LABEL = { strong_push: "强推", first_push: "首推", second_push: "次推" };
+const PUSH_TOL = { strong_push: 0.01, first_push: 0.02, second_push: 0.03 };
+const PUSH_CLS = { strong_push: "p0", first_push: "p1", second_push: "p2" };
 const PIN_KEY = "szq_pin_v1";
 const TOL_KEY = "szq_tol_v1";
 /* 快捷检索：胜负 / 负胜 取固定值（精确等于），初让胜 / 初让负 取浮动范围 */
@@ -168,19 +170,31 @@ async function boot() {
   if (saved) {
     try { S.cols = JSON.parse(saved); } catch (e) { }
   } else {
-    // 老缓存（v2）里没有首推 / 次推，补到「状态」后面，不用手动去列设置里勾
+    // 老缓存（v3）里没有强推，补到首推左边，不用手动去列设置里勾
     const old = LS.get(COLS_KEY_OLD);
     if (old) {
       try {
         const oc = JSON.parse(old);
-        const i = oc.indexOf("status");
-        oc.splice(i >= 0 ? i + 1 : oc.length, 0, "first_push", "second_push");
+        if (oc.indexOf("first_push") < 0) {
+          const i = oc.indexOf("status");
+          oc.splice(i >= 0 ? i + 1 : oc.length, 0, "strong_push", "first_push", "second_push");
+        } else if (oc.indexOf("strong_push") < 0) {
+          const i = oc.indexOf("first_push");
+          oc.splice(i >= 0 ? i : oc.length, 0, "strong_push");
+        }
         S.cols = oc;
         LS.set(COLS_KEY, JSON.stringify(oc));
       } catch (e) { }
     }
   }
+  // 缓存里已经有首推 / 次推但还没强推的（比如刚覆盖装完新版本）
+  if (S.cols && S.cols.indexOf("first_push") >= 0 && S.cols.indexOf("strong_push") < 0) {
+    const i = S.cols.indexOf("first_push");
+    S.cols.splice(i, 0, "strong_push");
+    LS.set(COLS_KEY, JSON.stringify(S.cols));
+  }
   LS.del(COLS_KEY_OLD);
+  LS.del("szq_cols_v2");
   LS.del("szq_cols");   // 旧版默认列缓存作废
   if (window.JSDB && window.JSDB.PUSH_MAX_SEL) S.pushMax = window.JSDB.PUSH_MAX_SEL;
 
@@ -858,8 +872,8 @@ function fmtCell(key, v) {
   if (v === null || v === undefined || v === "") return `<span class="cell-empty">—</span>`;
   if (key === "half" || key === "full") return `<span class="badge ${RESULT_STYLE[v] || ""}">${esc(v)}</span>`;
   if (key === "record" || key === "review") return `<span class="cell-note">${esc(v)}</span>`;
-  if (key === "first_push" || key === "second_push") {
-    const cls = key === "first_push" ? "p1" : "p2";
+  if (PUSH_FIELDS.indexOf(key) >= 0) {
+    const cls = PUSH_CLS[key] || "p1";
     if (v === "—") return `<span class="push-val none">—</span>`;
     // 「胜5、平3；让胜4」→ 票数弱化，结果名突出，扫一眼就知道哪个票最多
     const html = esc(v).replace(
@@ -939,7 +953,7 @@ function renderTable() {
   renderCheckedBar();   // 翻页 / 筛选后同步「已选 N 场」与按钮可用状态
 }
 
-/* ---------------- 首推 / 次推 ---------------- */
+/* ---------------- 强推 / 首推 / 次推 ---------------- */
 
 function renderCheckedBar() {
   const el = $("#ckInfo");
@@ -950,10 +964,11 @@ function renderCheckedBar() {
     : "";
   const c = $("#ckClear");
   if (c) c.onclick = () => { S.checked.clear(); renderTable(); };
-  [["btnPush1", "first_push"], ["btnPush2", "second_push"]].forEach(([bid, f]) => {
-    const b = $("#" + bid);
-    if (b) b.disabled = n === 0 || n > S.pushMax;
-  });
+  [["btnPush0", "strong_push"], ["btnPush1", "first_push"], ["btnPush2", "second_push"]]
+    .forEach(([bid, f]) => {
+      const b = $("#" + bid);
+      if (b) b.disabled = n === 0 || n > S.pushMax;
+    });
 }
 
 async function runPush(field) {
@@ -1775,6 +1790,7 @@ on("#btnPin", togglePin);
 on("#btnQuickFind", quickFindFromSel);
 on("#btnTol", cycleTol);
 renderTolUI();
+on("#btnPush0", () => runPush("strong_push"));
 on("#btnPush1", () => runPush("first_push"));
 on("#btnPush2", () => runPush("second_push"));
 renderCheckedBar();
