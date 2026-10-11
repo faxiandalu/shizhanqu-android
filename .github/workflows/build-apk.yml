@@ -4,6 +4,10 @@ on:
   push:
     branches: [ main, master ]
   workflow_dispatch: {}
+  # 每月 1 号自动跑一次，主要是给签名钥匙的缓存"续命"
+  # （GitHub 会把 7 天没人碰的缓存清掉，钥匙没了签名就会变，又得卸载重装）
+  schedule:
+    - cron: '0 19 1 * *'
 
 jobs:
   build:
@@ -67,14 +71,58 @@ jobs:
           ls "$ANDROID_HOME/build-tools" || true
           (gradle -v 2>&1 | head -6) || true
 
+      # ---------------------------------------------------------------
+      # 固定签名钥匙
+      # 编译机每次都是全新机器，默认的调试钥匙会重新生成 —— 签名一变，
+      # 手机就不让覆盖安装，必须先卸载，一卸载 App 里的数据全没了。
+      # 这里把钥匙缓存起来，之后每次编译都复用同一把，新版就能直接覆盖装。
+      # 钥匙只存在 GitHub 的缓存里，不进仓库、不进产物（仓库是公开的）。
+      # ---------------------------------------------------------------
+      - name: 取缓存的签名钥匙
+        uses: actions/cache@v4
+        with:
+          path: .signing/szq.p12
+          key: szq-signing-key-v1
+
+      - name: 没有钥匙就生成一把（仅首次）
+        run: |
+          mkdir -p .signing
+          if [ ! -f .signing/szq.p12 ]; then
+            echo "首次运行，生成固定签名钥匙"
+            keytool -genkeypair -v \
+              -keystore .signing/szq.p12 \
+              -storetype PKCS12 \
+              -keyalg RSA -keysize 2048 -validity 10950 \
+              -alias shizhanqu \
+              -storepass shizhanqu2026 -keypass shizhanqu2026 \
+              -dname "CN=shizhanqu, OU=app, O=shizhanqu, C=CN"
+          else
+            echo "用缓存里的固定钥匙，签名与上次一致"
+          fi
+          mkdir -p 实战区管理系统_安卓/app/keystore
+          cp .signing/szq.p12 实战区管理系统_安卓/app/keystore/szq.p12
+          ls -l 实战区管理系统_安卓/app/keystore/
+
       # 源码在 实战区管理系统_安卓/ 子目录里，Gradle 必须在那一层执行
-      - name: 编译 APK（调试签名，装上就能用）
+      - name: 编译 APK（固定签名，可直接覆盖安装）
         working-directory: 实战区管理系统_安卓
         run: |
           if [ -f gradlew ]; then
             ./gradlew assembleDebug --no-daemon
           else
             gradle assembleDebug --no-daemon
+          fi
+
+      - name: 打印签名证书指纹（换版本时这个值必须不变）
+        run: |
+          APK=$(ls 实战区管理系统_安卓/app/build/outputs/apk/debug/*.apk | head -1)
+          echo "APK=$APK"
+          AS=$(ls -d /usr/local/lib/android/sdk/build-tools/*/apksigner | head -1)
+          if [ -n "$AS" ]; then
+            $AS verify --print-certs -verbose "$APK" 2>&1 | grep -iE "SHA1|SHA256|DN:|Verifies" | head -12
+          else
+            echo "没找到 apksigner，改看签名块"
+            unzip -l "$APK" | grep -iE "META-INF" || echo "（无 META-INF，可能只签了 v2）"
           fi
 
       - name: 传出 APK
