@@ -10,12 +10,37 @@ android {
         applicationId "com.shizhanqu.app"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        // 每次发新版本记得把 versionCode 往上加，手机才能顺滑覆盖安装
+        versionCode 2
+        versionName "1.1"
+    }
+
+    // 固定签名钥匙。
+    // 为什么必须有：GitHub 的编译机每次都是新机器，默认的调试密钥会重新生成，
+    // 签名一变，Android 就拒绝覆盖安装，必须先卸载 —— 一卸载 App 数据就没了。
+    // 用同一把钥匙签名后，新版 APK 可以直接覆盖，数据原样保留。
+    // 钥匙文件本身不进仓库（仓库是公开的），由编译机从 Secrets 里取出来。
+    signingConfigs {
+        release {
+            storeFile file("keystore/szq.p12")
+            storeType "pkcs12"
+            storePassword "shizhanqu2026"
+            keyAlias "shizhanqu"
+            keyPassword "shizhanqu2026"
+        }
     }
 
     buildTypes {
+        debug {
+            // 调试包也用同一把钥匙，这样每次编出来的都能覆盖装
+            if (file("keystore/szq.p12").exists()) {
+                signingConfig signingConfigs.release
+            }
+        }
         release {
+            if (file("keystore/szq.p12").exists()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
         }
     }
