@@ -460,3 +460,23 @@ table.grid tbody tr.pin.sel td { background: var(--primary-soft); }
   .mrow { margin-bottom: 8px; }
   .empty-tip { padding: 24px 16px; font-size: 13px; }
 }
+
+/* ---- 首推 / 次推 ---- */
+.ck-col { width: 34px; text-align: center; padding-left: 4px !important; padding-right: 4px !important; }
+.ck-col input { width: 16px; height: 16px; margin: 0; vertical-align: middle; cursor: pointer; }
+tr.ckd > td { background: #fffbe6; }
+tr.ckd:hover > td { background: #fff5cc; }
+.push-val { font-weight: 600; white-space: nowrap; }
+.push-val.p1 { color: #c0392b; }
+.push-val.p2 { color: #b7791f; }
+.push-val.none { color: var(--muted); font-weight: 400; }
+/* 票数：弱化下去，让「胜 / 平 / 负」这几个字先跳出来 */
+.push-val .cnt { font-style: normal; font-weight: 500; font-size: 11px; margin-left: 1px; opacity: .7; }
+.ckinfo { font-size: 12px; color: var(--text-2); }
+.ckinfo b { color: var(--warn); }
+.ckinfo a { color: var(--primary); text-decoration: none; }
+.pushbtn { font-weight: 600; }
+.pushbtn.p1 { color: #c0392b; border-color: #e8b4b4; }
+.pushbtn.p1:hover:not(:disabled) { background: #fdecec; border-color: #c0392b; color: #c0392b; }
+.pushbtn.p2 { color: #b7791f; border-color: #e5cda3; }
+.pushbtn.p2:hover:not(:disabled) { background: #fdf5e6; border-color: #b7791f; color: #b7791f; }
