@@ -412,11 +412,13 @@
    * 1) 按列名匹配（原名 → 去后缀 → 别名）
    * 2) 认不出来的按「标准列序」同位置兜底（前提是该标准 key 没被别的列占用）
    * 新版表里两组赔率都叫「胜/平/负」，重名没法靠名字分，正靠第 2 层按位置分开。
-   * 返回 { pos: [列号或 -1, ...]（按 ALL_KEYS 顺序）, unknown: [没认出的列名] }
+   * 返回 { pos: 按 ALL_KEYS 顺序的列号(-1 表示没来源),
+   *        unknown: 没敢配的列名,
+   *        guessed: 靠位置补上的 [{col, name, label}] —— 这些是猜的，要报给用户抽查 }
    */
   function mapHeader(header) {
     var n = header.length, i;
-    var keys = new Array(n), used = {}, unknown = [];
+    var keys = new Array(n), used = {}, unknown = [], guessed = [];
     for (i = 0; i < n; i++) keys[i] = null;
     for (i = 0; i < n; i++) {
       var h = String(header[i] == null ? "" : header[i]).trim();
@@ -431,7 +433,10 @@
         if (keys[i]) continue;
         if (i < ALL_KEYS.length) {
           var std = ALL_KEYS[i];
-          if (!used[std]) { keys[i] = std; used[std] = 1; }
+          if (!used[std]) {
+            keys[i] = std; used[std] = 1;
+            guessed.push({ col: i + 1, name: String(header[i] == null ? "" : header[i]).trim(), label: FIELD_MAP[std][1] });
+          }
         }
       }
     }
@@ -440,7 +445,7 @@
       for (var j = 0; j < n; j++) if (keys[j] === k) return j;
       return -1;
     });
-    return { pos: pos, unknown: unknown, keys: keys };
+    return { pos: pos, unknown: unknown, keys: keys, guessed: guessed };
   }
 
   /** 一批 SQL 放进一个事务里跑（安卓桥提供 execBatch；测试环境退化成逐条执行） */
