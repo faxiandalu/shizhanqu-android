@@ -17,6 +17,7 @@ public class MainActivity extends Activity {
     static final int REQ_PICK_DB = 1001;
     static final int REQ_SAVE_FILE = 1002;
     static final int REQ_PICK_XLSX = 1003;
+    static final int REQ_PICK_TEXT = 1004;
 
     private WebView web;
     private DbBridge bridge;
@@ -99,6 +100,21 @@ public class MainActivity extends Activity {
         }
     }
 
+    /** 让手机上的系统文件选择器挑一个小的 CSV / 文本文件（记录·复盘专用） */
+    void pickTextFile(String mime) {
+        try {
+            Intent it = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            it.addCategory(Intent.CATEGORY_OPENABLE);
+            it.setType("*/*");
+            String primary = (mime == null || mime.length() == 0) ? "text/csv" : mime;
+            it.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{primary, "text/*", "application/octet-stream", "*/*"});
+            startActivityForResult(it, REQ_PICK_TEXT);
+        } catch (Exception e) {
+            showToast("打不开文件选择器：" + e.getMessage());
+            bridge.notifyText(false, "打不开文件选择器：" + e.getMessage(), 0);
+        }
+    }
+
     /** 导出：弹出系统保存对话框，让用户选保存位置 */
     void saveTextFile(String fileName) {
         try {
@@ -123,6 +139,7 @@ public class MainActivity extends Activity {
         if (res != RESULT_OK || data == null || data.getData() == null) {
             if (req == REQ_PICK_DB) bridge.notifyDb(false, "已取消选择");
             if (req == REQ_PICK_XLSX) bridge.notifyImport(false, "已取消选择", 0);
+            if (req == REQ_PICK_TEXT) bridge.notifyText(false, "已取消选择", 0);
             return;
         }
         android.net.Uri uri = data.getData();
@@ -138,6 +155,12 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {
             }
             bridge.prepareImport(uri);
+        } else if (req == REQ_PICK_TEXT) {
+            try {
+                getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Exception ignored) {
+            }
+            bridge.readTextToMemory(uri);
         } else if (req == REQ_SAVE_FILE) {
             try {
                 getContentResolver().takePersistableUriPermission(uri,
