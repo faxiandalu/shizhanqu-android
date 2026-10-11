@@ -1,0 +1,19 @@
+.gradle/
+build/
+app/build/
+local.properties
+*.iml
+.idea/
+captures/
+
+# 签名钥匙：绝不进仓库（仓库是公开的）
+app/keystore/
+keystore/
+*.p12
+*.jks
+*.keystore
+上传GitHub.py
+怎么编译出APK.md
+._github_token
+__pycache__/
+*.pyc
