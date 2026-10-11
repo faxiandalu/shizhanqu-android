@@ -461,12 +461,13 @@ table.grid tbody tr.pin.sel td { background: var(--primary-soft); }
   .empty-tip { padding: 24px 16px; font-size: 13px; }
 }
 
-/* ---- 首推 / 次推 ---- */
+/* ---- 强推 / 首推 / 次推 ---- */
 .ck-col { width: 34px; text-align: center; padding-left: 4px !important; padding-right: 4px !important; }
 .ck-col input { width: 16px; height: 16px; margin: 0; vertical-align: middle; cursor: pointer; }
 tr.ckd > td { background: #fffbe6; }
 tr.ckd:hover > td { background: #fff5cc; }
 .push-val { font-weight: 600; white-space: nowrap; }
+.push-val.p0 { color: #8e2de2; }
 .push-val.p1 { color: #c0392b; }
 .push-val.p2 { color: #b7791f; }
 .push-val.none { color: var(--muted); font-weight: 400; }
@@ -476,6 +477,8 @@ tr.ckd:hover > td { background: #fff5cc; }
 .ckinfo b { color: var(--warn); }
 .ckinfo a { color: var(--primary); text-decoration: none; }
 .pushbtn { font-weight: 600; }
+.pushbtn.p0 { color: #8e2de2; border-color: #d9c2ee; }
+.pushbtn.p0:hover:not(:disabled) { background: #f6f0fd; border-color: #8e2de2; color: #8e2de2; }
 .pushbtn.p1 { color: #c0392b; border-color: #e8b4b4; }
 .pushbtn.p1:hover:not(:disabled) { background: #fdecec; border-color: #c0392b; color: #c0392b; }
 .pushbtn.p2 { color: #b7791f; border-color: #e5cda3; }
