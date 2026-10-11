@@ -9,10 +9,15 @@ const DEFAULT_COLS = ["new_id", "match_time", "match_no", "league", "teams",
   "s_h_win", "s_h_draw", "s_h_lose",
   "wl", "lw",
   "half_score", "full_score", "half", "full", "half_full", "ou",
-  "handicap_result", "status", "record", "review"];
+  "handicap_result", "status", "first_push", "second_push", "record", "review"];
 /* 这三组赔率列左侧画一条分割线：初胜组 / 初让胜组 / 胜负组 */
 const SEP_COLS = ["s_win", "s_h_win", "wl"];
-const COLS_KEY = "szq_cols_v2";
+const COLS_KEY = "szq_cols_v3";   // v3：多了首推 / 次推两列
+const COLS_KEY_OLD = "szq_cols_v2";
+/* 首推 / 次推：勾若干行 → 点按钮 → 按公式筛历史样本，结果写进这两列并存盘 */
+const PUSH_FIELDS = ["first_push", "second_push"];
+const PUSH_LABEL = { first_push: "首推", second_push: "次推" };
+const PUSH_TOL = { first_push: 0.02, second_push: 0.03 };
 const PIN_KEY = "szq_pin_v1";
 const TOL_KEY = "szq_tol_v1";
 /* 快捷检索：胜负 / 负胜 取固定值（精确等于），初让胜 / 初让负 取浮动范围 */
@@ -20,7 +25,7 @@ const QF_FIXED = ["wl", "lw"];
 const QF_RANGE = ["s_h_win", "s_h_lose"];
 const QF_KEYS = QF_FIXED.concat(QF_RANGE);
 const TOL_LIST = [0.01, 0.02, 0.03, 0.05];
-const GROUP_ORDER = ["基本信息", "赛果", "赔率", "记录复盘"];
+const GROUP_ORDER = ["基本信息", "赛果", "赔率", "推荐", "记录复盘"];
 const RESULT_STYLE = { "胜": "win", "平": "draw", "负": "lose", "让胜": "win", "让平": "draw", "让负": "lose" };
 /* 状态栏统计：只统计这两个字段，按指定顺序展示 */
 const STAT_FIELDS = [
@@ -50,6 +55,8 @@ const S = {
   sel: null, editing: null,
   pin: null,          // 置顶行：{ id, new_id, label }，筛选后仍排第一行
   tol: 0.02,          // 快捷检索里「初让胜 / 初让负」的浮动范围
+  checked: new Set(), // 勾选待算「首推 / 次推」的行 id，翻页不丢
+  pushMax: 30,        // 一次最多算多少场
   stats: {}, envPath: ""
 };
 
@@ -148,9 +155,34 @@ async function boot() {
   S.enumFields = meta.enumFields || [];
   S.suggestFields = meta.suggestFields || [];
 
+  /* 手机上用的库是电脑导过来的；万一电脑那边还没跑过新版，这里先把两列补上。
+     顺便把「结果里没有票数」的老值重算一遍，跟电脑版自动升级保持一致。 */
+  try {
+    if (window.JSDB) {
+      window.JSDB.ensurePushColumns();
+      window.JSDB.recalcPushTexts();
+    }
+  } catch (e) { /* 补列失败不拦着启动，用户下次选库时会再试一次 */ }
+
   const saved = LS.get(COLS_KEY);
-  if (saved) { try { S.cols = JSON.parse(saved); } catch (e) { } }
+  if (saved) {
+    try { S.cols = JSON.parse(saved); } catch (e) { }
+  } else {
+    // 老缓存（v2）里没有首推 / 次推，补到「状态」后面，不用手动去列设置里勾
+    const old = LS.get(COLS_KEY_OLD);
+    if (old) {
+      try {
+        const oc = JSON.parse(old);
+        const i = oc.indexOf("status");
+        oc.splice(i >= 0 ? i + 1 : oc.length, 0, "first_push", "second_push");
+        S.cols = oc;
+        LS.set(COLS_KEY, JSON.stringify(oc));
+      } catch (e) { }
+    }
+  }
+  LS.del(COLS_KEY_OLD);
   LS.del("szq_cols");   // 旧版默认列缓存作废
+  if (window.JSDB && window.JSDB.PUSH_MAX_SEL) S.pushMax = window.JSDB.PUSH_MAX_SEL;
 
   /* 置顶行 / 浮动范围：记住上次的选择，重开 App 还在 */
   const sp = LS.get(PIN_KEY);
@@ -826,6 +858,15 @@ function fmtCell(key, v) {
   if (v === null || v === undefined || v === "") return `<span class="cell-empty">—</span>`;
   if (key === "half" || key === "full") return `<span class="badge ${RESULT_STYLE[v] || ""}">${esc(v)}</span>`;
   if (key === "record" || key === "review") return `<span class="cell-note">${esc(v)}</span>`;
+  if (key === "first_push" || key === "second_push") {
+    const cls = key === "first_push" ? "p1" : "p2";
+    if (v === "—") return `<span class="push-val none">—</span>`;
+    // 「胜5、平3；让胜4」→ 票数弱化，结果名突出，扫一眼就知道哪个票最多
+    const html = esc(v).replace(
+      /(让胜|让平|让负|胜|平|负)(\d+)/g,
+      (m, name, cnt) => name + `<i class="cnt">${cnt}</i>`);
+    return `<span class="push-val ${cls}">${html}</span>`;
+  }
   if (key === "teams") return `<span title="${esc(v)}">${esc(v)}</span>`;
   if (typeof v === "number") return String(v);
   return esc(v);
@@ -840,6 +881,7 @@ function renderTable() {
   const sepOf = (k, i) => (i > 0 && SEP_COLS.indexOf(k) >= 0) ? " sep" : "";
   const cols = S.cols.filter(k => S.fmap[k]);
   let html = `<table class="grid"><thead><tr>`;
+  html += `<th class="ck-col"><input type="checkbox" id="ckAll" title="全选 / 取消本页"></th>`;
   cols.forEach((k, i) => {
     const f = S.fmap[k];
     const arrow = S.sort.field === k ? `<span class="arrow">${S.sort.dir === "asc" ? "▲" : "▼"}</span>` : "";
@@ -847,14 +889,37 @@ function renderTable() {
   });
   html += `</tr></thead><tbody>`;
   S.rows.forEach(r => {
-    const cls = [S.sel === r.id ? "sel" : "", r.__pin ? "pin" : ""].filter(Boolean).join(" ");
+    const cls = [S.sel === r.id ? "sel" : "", r.__pin ? "pin" : "",
+                 S.checked.has(r.id) ? "ckd" : ""].filter(Boolean).join(" ");
     const mark = r.__pin ? `<span class="pinmark" title="置顶参照行：它本身不符合当前筛选条件">置顶</span>` : "";
+    const ck = S.checked.has(r.id) ? " checked" : "";
     html += `<tr data-id="${r.id}" class="${cls}">` +
+      `<td class="ck-col"><input type="checkbox" class="ck" data-id="${r.id}"${ck}></td>` +
       cols.map((k, i) => `<td class="${sepOf(k, i)}">${i === 0 ? mark : ""}${fmtCell(k, r[k])}</td>`).join("") + `</tr>`;
   });
   html += `</tbody></table>`;
   wrap.innerHTML = html;
-  $$("th", wrap).forEach(th => th.onclick = () => {
+
+  /* 勾选框：手机上点行会直接打开详情，所以勾選項必须拦住冒泡 */
+  $$("input.ck", wrap).forEach(cb => {
+    cb.onclick = e => {
+      e.stopPropagation();
+      const id = +cb.dataset.id;
+      if (cb.checked) S.checked.add(id); else S.checked.delete(id);
+      cb.closest("tr").classList.toggle("ckd", cb.checked);
+      renderCheckedBar();
+    };
+  });
+  const ckAll = $("#ckAll", wrap);
+  if (ckAll) {
+    ckAll.checked = S.rows.length > 0 && S.rows.every(r => S.checked.has(r.id));
+    ckAll.onclick = e => {
+      e.stopPropagation();
+      S.rows.forEach(r => ckAll.checked ? S.checked.add(r.id) : S.checked.delete(r.id));
+      renderTable();
+    };
+  }
+  $$("th[data-k]", wrap).forEach(th => th.onclick = () => {   // 最前面那列是勾选框，没有 data-k
     const k = th.dataset.k;
     if (S.sort.field === k) S.sort.dir = S.sort.dir === "asc" ? "desc" : "asc";
     else { S.sort.field = k; S.sort.dir = "asc"; }
@@ -871,6 +936,57 @@ function renderTable() {
     };
     tr.ondblclick = () => openDrawer(+tr.dataset.id);   // 双击：打开详情
   });
+  renderCheckedBar();   // 翻页 / 筛选后同步「已选 N 场」与按钮可用状态
+}
+
+/* ---------------- 首推 / 次推 ---------------- */
+
+function renderCheckedBar() {
+  const el = $("#ckInfo");
+  if (!el) return;
+  const n = S.checked.size;
+  el.innerHTML = n
+    ? `已选 <b>${n}</b> 场 · <a href="javascript:;" id="ckClear">清空</a>`
+    : "";
+  const c = $("#ckClear");
+  if (c) c.onclick = () => { S.checked.clear(); renderTable(); };
+  [["btnPush1", "first_push"], ["btnPush2", "second_push"]].forEach(([bid, f]) => {
+    const b = $("#" + bid);
+    if (b) b.disabled = n === 0 || n > S.pushMax;
+  });
+}
+
+async function runPush(field) {
+  const ids = Array.from(S.checked);
+  if (!ids.length) { toast("先在每行最前面的方框里勾选比赛", { err: true }); return; }
+  if (ids.length > S.pushMax) {
+    toast(`一次最多算 ${S.pushMax} 场，现在勾了 ${ids.length} 场`, { err: true }); return;
+  }
+  const label = PUSH_LABEL[field] || field;
+  const tol = PUSH_TOL[field];
+  busy(true, `正在按${label}公式筛选历史样本…`);
+  await sleep(30);
+  try {
+    const r = window.JSDB.computePush(ids, field);
+    if (!r || r.error) throw new Error((r && r.error) || "计算失败");
+    const items = r.items || [];
+    let blank = 0, none = 0, wrote = 0;
+    items.forEach(it => {
+      if (it.text === "—") none++;
+      else if (!it.text) blank++;
+      else wrote++;
+    });
+    const lines = items.slice(0, 6).map(it =>
+      `${it.new_id}：${it.text || "（空）"}　<span style="color:var(--muted)">${it.n} 条</span>`).join("<br>");
+    toast(`<b>${label}</b>（初让胜 / 初让负 ±${tol}）已算完并写入数据库<br>
+      共 ${items.length} 场：有结果 <b>${wrote}</b>　凑齐三项写空 <b>${blank}</b>　没样本 <b>${none}</b>
+      ${items.length > 6 ? `<br><br>${lines}<br>…等共 ${items.length} 场` : (lines ? `<br><br>${lines}` : "")}`);
+    await refresh();
+  } catch (e) {
+    toast(`${label}计算失败：` + e.message, { err: true });
+  } finally {
+    busy(false);
+  }
 }
 
 function renderPager() {
@@ -969,7 +1085,7 @@ function renderDrawer(row, isEdit) {
         <textarea data-f="${k}" maxlength="${S.textMax}" placeholder="输入${esc(f.label)}内容，最多 ${S.textMax} 个字">${esc(v)}</textarea>
       </div></div>`;
   });
-  ["基本信息", "赛果", "赔率"].forEach(g => {
+  ["推荐", "基本信息", "赛果", "赔率"].forEach(g => {
     html += `<div class="sect">${g}</div><div class="grid2">`;
     S.fields.filter(f => f.group === g).forEach(f => {
       const v = row[f.key] ?? "";
@@ -1659,6 +1775,9 @@ on("#btnPin", togglePin);
 on("#btnQuickFind", quickFindFromSel);
 on("#btnTol", cycleTol);
 renderTolUI();
+on("#btnPush1", () => runPush("first_push"));
+on("#btnPush2", () => runPush("second_push"));
+renderCheckedBar();
 
 $("#btnSave").onclick = async () => {
   const data = collectForm();
