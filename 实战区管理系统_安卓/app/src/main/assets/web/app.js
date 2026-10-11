@@ -1450,6 +1450,7 @@ function impBar(pct, text) {
 async function runMobileImport(opt) {
   const A = window.Android;
   let header = null;
+  let hdrInfo = null;
   let from = 0, read = 0;
   const CHUNK = 1200;
   const total = A.importCsvRows();
@@ -1467,7 +1468,8 @@ async function runMobileImport(opt) {
 
       if (!header) {
         header = JSDB.parseCsvLine(lines[0]).map(s => String(s).trim());
-        const pos = JSDB.ALL_KEYS.map(k => header.indexOf(JSDB.FIELD_MAP[k][1]));
+        hdrInfo = JSDB.mapHeader(header);   // 列名变了也能认（去后缀 + 重名按位置兜底）
+        const pos = hdrInfo.pos;
         const iId = JSDB.ALL_KEYS.indexOf("new_id");
         const iTime = JSDB.ALL_KEYS.indexOf("match_time");
         if (pos[iId] < 0 && pos[iTime] < 0) {
@@ -1477,7 +1479,7 @@ async function runMobileImport(opt) {
       const consumed = lines.length;
       const body = (from === 0) ? lines.slice(1) : lines;
 
-      const pos = JSDB.ALL_KEYS.map(k => header.indexOf(JSDB.FIELD_MAP[k][1]));
+      const pos = hdrInfo.pos;
       const rows = [];
       for (const ln of body) {
         if (!ln) continue;
@@ -1506,7 +1508,13 @@ async function runMobileImport(opt) {
     if (res.error) throw new Error(res.error);
     impBar(100, "导入完成");
     closeModal();
-    toast(`导入完成：共 ${res.total} 行，新增 ${res.inserted} 条，覆盖 ${res.updated} 条，没变化 ${res.unchanged} 条`);
+    let mmsg = `导入完成：共 ${res.total} 行，新增 ${res.inserted} 条，覆盖 ${res.updated} 条，没变化 ${res.unchanged} 条`;
+    const un = (hdrInfo && hdrInfo.unknown) || [];
+    if (un.length) {
+      mmsg += `<br><br><b style="color:#c0392b">⚠ 有 ${un.length} 列表头没认出来：${un.slice(0, 10).map(esc).join("、")}${un.length > 10 ? " …" : ""}</b>` +
+        `<br>这几列的数据没有导入，通常是数据源改了列名，请核对。`;
+    }
+    toast(mmsg, { err: un.length > 0 });
     await loadStats();
     buildQuickPanel();
     S.page = 1;
