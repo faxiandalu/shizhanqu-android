@@ -1512,7 +1512,13 @@ async function runMobileImport(opt) {
     const un = (hdrInfo && hdrInfo.unknown) || [];
     if (un.length) {
       mmsg += `<br><br><b style="color:#c0392b">⚠ 有 ${un.length} 列表头没认出来：${un.slice(0, 10).map(esc).join("、")}${un.length > 10 ? " …" : ""}</b>` +
-        `<br>这几列的数据没有导入，通常是数据源改了列名，请核对。`;
+        `<br>这几列的数据<b>没有导入</b>，通常是数据源改了列名，请核对。`;
+    }
+    const gs = (hdrInfo && hdrInfo.guessed) || [];
+    if (gs.length) {
+      const show = gs.slice(0, 10).map(g => `第${g.col}列「${esc(g.name)}」→${esc(g.label)}`).join("；");
+      mmsg += `<br><br><b style="color:#b8860b">△ 有 ${gs.length} 列名字没认出来，是按位置补上的：${show}${gs.length > 10 ? " …" : ""}</b>` +
+        `<br>数据已导入，但这些是靠列位置猜的，<b>请抽查一行</b>。`;
     }
     toast(mmsg, { err: un.length > 0 });
     await loadStats();
