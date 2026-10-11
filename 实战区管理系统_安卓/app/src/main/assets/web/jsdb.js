@@ -46,9 +46,11 @@
     ["lw", "负胜", "real", "赔率"],
     ["ld", "负平", "real", "赔率"],
     ["ll", "负负", "real", "赔率"],
-    // 首推 / 次推：程序按公式算出来的，放在最后（别插中间，会打乱表头位置兜底）
+    // 强推 / 首推 / 次推：程序按公式算出来的，放在最后（别插中间，会打乱表头位置兜底）
+    // 显示顺序 强推 → 首推 → 次推 由前端 DEFAULT_COLS 决定，这里三列都挂末尾
     ["first_push", "首推", "text", "推荐"],
-    ["second_push", "次推", "text", "推荐"]
+    ["second_push", "次推", "text", "推荐"],
+    ["strong_push", "强推", "text", "推荐"]
   ];
   var FIELD_MAP = {};
   FIELDS.forEach(function (f) { FIELD_MAP[f[0]] = f; });
@@ -57,15 +59,16 @@
   var SUGGEST_FIELDS = ["league", "match_no"];
   var TEXT_FIELDS_LIMITED = ["record", "review"];
 
-  /* ---------------- 首推 / 次推 ----------------
+  /* ---------------- 强推 / 首推 / 次推 ----------------
    *
    * 和电脑版 db.py 完全同一套公式：以本行自己为基准去历史库找同型样本，
    *   wl / lw        固定值，精确等于本条
-   *   s_h_win / s_h_lose  本条 ±0.02（首推）/ ±0.03（次推）
-   * 统计出各结果得了几票，写到 first_push / second_push 两列里。
+   *   s_h_win / s_h_lose  本条 ±0.01（强推）/ ±0.02（首推）/ ±0.03（次推）
+   * 统计出各结果得了几票，写到 strong_push / first_push / second_push 三列里。
+   * 三档只差这一个容差，其余一字不差。
    */
-  var PUSH_FIELDS = ["first_push", "second_push"];
-  var PUSH_TOL = { first_push: 0.02, second_push: 0.03 };
+  var PUSH_FIELDS = ["strong_push", "first_push", "second_push"];
+  var PUSH_TOL = { strong_push: 0.01, first_push: 0.02, second_push: 0.03 };
   var PUSH_MAX_SEL = 30;
   // 只有这些算有效赛果；「无效场次」「取消」「--」「空」统统不算样本
   var VALID_FULL = ["胜", "平", "负"];
@@ -906,7 +909,7 @@
    *  返回 { field, tol, items:[{id,new_id,text,n,fcnt,hcnt,fulls,hds}], updated, skipped } */
   function computePush(ids, field, exclude) {
     field = field || "first_push";
-    if (PUSH_FIELDS.indexOf(field) < 0) return { error: "field 只能是 first_push 或 second_push" };
+    if (PUSH_FIELDS.indexOf(field) < 0) return { error: "field 只能是 strong_push / first_push / second_push" };
     var tol = PUSH_TOL[field];
 
     var idList = [];
@@ -989,8 +992,10 @@
    *  票数当时没存库，反推不出来，只能拿赔率重算一遍。
    *  只动「非空、不是 —、且里面一个数字都没有」的格子。 */
   function recalcPushTexts() {
-    var done = { first_push: 0, second_push: 0 };
-    var r = run("SELECT id, first_push, second_push FROM matches", []);
+    // 跟电脑版 db.recalc_push_texts 保持一致：返回里只有「有格子要重算」的那几档，
+    // 一格都没得重算时返回三档全 0
+    var done = {};
+    var r = run("SELECT id, strong_push, first_push, second_push FROM matches", []);
     if (r.error) return { error: r.error };
     var todo = {}, all = {}, i, k, v;
     for (i = 0; i < r.rows.length; i++) {
@@ -1006,7 +1011,11 @@
     }
     var keys = [];
     for (k in todo) keys.push(k);
-    if (!keys.length) return done;
+    if (!keys.length) {
+      var zero = {};
+      for (var zi = 0; zi < PUSH_FIELDS.length; zi++) zero[PUSH_FIELDS[zi]] = 0;
+      return zero;
+    }
 
     // 这批行彼此当作「同批勾选」，统计时互相排除，跟当初手点时保持一致
     var allIds = [];
@@ -1017,6 +1026,7 @@
       var field = keys[q];
       var tol = PUSH_TOL[field];
       var list = todo[field];
+      if (!done[field]) done[field] = 0;
       var exclSql = " AND id NOT IN (" + allIds.map(function () { return "?"; }).join(",") + ")";
       for (i = 0; i < list.length; i++) {
         var rr = run("SELECT id, wl, lw, s_h_win, s_h_lose FROM matches WHERE id=?", [list[i]]);
