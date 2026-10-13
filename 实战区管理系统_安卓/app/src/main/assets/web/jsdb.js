@@ -69,7 +69,7 @@
    */
   var PUSH_FIELDS = ["strong_push", "first_push", "second_push"];
   var PUSH_TOL = { strong_push: 0.01, first_push: 0.02, second_push: 0.03 };
-  var PUSH_MAX_SEL = 30;
+  var PUSH_MAX_SEL = 50;
   // 只有这些算有效赛果；「无效场次」「取消」「--」「空」统统不算样本
   var VALID_FULL = ["胜", "平", "负"];
   var VALID_HANDICAP = ["让胜", "让平", "让负"];
