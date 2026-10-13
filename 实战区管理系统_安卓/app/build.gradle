@@ -11,8 +11,8 @@ android {
         minSdk 24
         targetSdk 34
         // 每次发新版本记得把 versionCode 往上加，手机才能顺滑覆盖安装
-        versionCode 5
-        versionName "1.4"
+        versionCode 6
+        versionName "1.5"
     }
 
     // 固定签名钥匙。
