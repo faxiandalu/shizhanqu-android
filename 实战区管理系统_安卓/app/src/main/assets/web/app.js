@@ -58,7 +58,7 @@ const S = {
   pin: null,          // 置顶行：{ id, new_id, label }，筛选后仍排第一行
   tol: 0.02,          // 快捷检索里「初让胜 / 初让负」的浮动范围
   checked: new Set(), // 勾选待算「首推 / 次推」的行 id，翻页不丢
-  pushMax: 30,        // 一次最多算多少场
+  pushMax: 50,        // 一次最多算多少场
   stats: {}, envPath: ""
 };
 
