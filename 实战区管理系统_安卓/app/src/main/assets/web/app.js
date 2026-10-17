@@ -9,9 +9,14 @@ const DEFAULT_COLS = ["new_id", "match_time", "match_no", "league", "teams",
   "s_h_win", "s_h_draw", "s_h_lose",
   "wl", "lw",
   "half_score", "full_score", "half", "full", "half_full", "ou",
-  "handicap_result", "status", "strong_push", "first_push", "second_push", "record", "review"];
+  "handicap_result", "status", "strong_push", "first_push", "second_push", "record", "match_no2", "review"];
+/* 「竞彩场次」的副本：内容跟左边那列一模一样，放在「复盘」左边，
+   手机上横着拖看复盘 / 推荐时，不用往回滚就知道看的是哪场比赛。
+   virt=1 表示它是纯显示用的影子列：不进数据库、不能编辑、不参与筛选和排序，
+   只能在「列设置」里显示 / 隐藏。src 指出内容从哪个真字段取。 */
+const VIRT_COLS = [{ key: "match_no2", label: "竞彩场次", type: "text", group: "基本信息", virt: 1, src: "match_no" }];
 /* 这三组赔率列左侧画一条分割线：初胜组 / 初让胜组 / 胜负组 */
-const COLS_KEY = "szq_cols_v4";   // v4：多了强推一列（顺序 强推 → 首推 → 次推）
+const COLS_KEY = "szq_cols_v5";   // v5：多了「竞彩场次（副本）」一列
 const COLS_KEY_OLD = "szq_cols_v3";
 const SEP_COLS = ["s_win", "s_h_win", "wl"];
 /* 强推 / 首推 / 次推：勾若干行 → 点按钮 → 按公式筛历史样本，结果写进对应列并存盘
@@ -151,8 +156,14 @@ function confirmBox(title, msg) {
 /* ---------------- 初始化 ---------------- */
 async function boot() {
   const meta = await api("meta");
-  S.fields = meta.fields;
-  S.fmap = {}; meta.fields.forEach(f => S.fmap[f.key] = f);
+  /* 影子列只活在前端，后端字段表里没有它；插到它对应的真字段右边，
+     「列设置」里两个「竞彩场次」挨着，好认 */
+  S.fields = meta.fields.slice();
+  VIRT_COLS.forEach(v => {
+    const i = S.fields.findIndex(f => f.key === v.src);
+    S.fields.splice(i >= 0 ? i + 1 : S.fields.length, 0, v);
+  });
+  S.fmap = {}; S.fields.forEach(f => S.fmap[f.key] = f);
   S.textMax = meta.textMaxLen || 50;
   S.enumFields = meta.enumFields || [];
   S.suggestFields = meta.suggestFields || [];
@@ -193,8 +204,15 @@ async function boot() {
     S.cols.splice(i, 0, "strong_push");
     LS.set(COLS_KEY, JSON.stringify(S.cols));
   }
+  /* v5 新增：竞彩场次的副本插到「复盘」左边（只补这一次，之后用户取消勾选不会被加回来） */
+  if (S.cols && S.cols.indexOf("match_no2") < 0) {
+    const i = S.cols.indexOf("review");
+    S.cols.splice(i >= 0 ? i : S.cols.length, 0, "match_no2");
+    LS.set(COLS_KEY, JSON.stringify(S.cols));
+  }
   LS.del(COLS_KEY_OLD);
   LS.del("szq_cols_v2");
+  LS.del("szq_cols_v4");
   LS.del("szq_cols");   // 旧版默认列缓存作废
   if (window.JSDB && window.JSDB.PUSH_MAX_SEL) S.pushMax = window.JSDB.PUSH_MAX_SEL;
 
@@ -217,7 +235,8 @@ async function boot() {
 
 function buildSortSelect() {
   const sel = $("#sortField");
-  sel.innerHTML = S.fields.map(f => `<option value="${f.key}">${esc(f.label)}</option>`).join("");
+  /* 影子列不能拿来排序（后端不认），跳过 */
+  sel.innerHTML = S.fields.filter(f => !f.virt).map(f => `<option value="${f.key}">${esc(f.label)}</option>`).join("");
   sel.value = "new_id";
   sel.onchange = () => { S.sort.field = sel.value; S.page = 1; refresh(); };
   $("#sortDir").onchange = e => { S.sort.dir = e.target.value; S.page = 1; refresh(); };
@@ -253,7 +272,7 @@ function buildFilterPanel() {
   const panel = $("#filterPanel");
   panel.innerHTML = "";
   GROUP_ORDER.forEach(g => {
-    const items = S.fields.filter(f => f.group === g);
+    const items = S.fields.filter(f => f.group === g && !f.virt);   // 影子列不能当筛选条件
     if (!items.length) return;
     const wrap = document.createElement("div");
     wrap.className = "group";
@@ -896,10 +915,14 @@ function renderTable() {
   const cols = S.cols.filter(k => S.fmap[k]);
   let html = `<table class="grid"><thead><tr>`;
   html += `<th class="ck-col"><input type="checkbox" id="ckAll" title="全选 / 取消本页"></th>`;
+  /* 影子列（如「竞彩场次」副本）没有自己的数据，内容从 src 指的真字段取 */
+  const srcOf = k => S.fmap[k].src || k;
   cols.forEach((k, i) => {
     const f = S.fmap[k];
-    const arrow = S.sort.field === k ? `<span class="arrow">${S.sort.dir === "asc" ? "▲" : "▼"}</span>` : "";
-    html += `<th data-k="${k}" class="${sepOf(k, i)}">${esc(f.label)}${arrow}</th>`;
+    const sk = srcOf(k);
+    const arrow = S.sort.field === sk ? `<span class="arrow">${S.sort.dir === "asc" ? "▲" : "▼"}</span>` : "";
+    const tip = f.virt ? ` title="「${esc(f.label)}」的副本，内容一样，只是放在这里方便对照"` : "";
+    html += `<th data-k="${k}" class="${sepOf(k, i)}"${tip}>${esc(f.label)}${arrow}</th>`;
   });
   html += `</tr></thead><tbody>`;
   S.rows.forEach(r => {
@@ -909,7 +932,7 @@ function renderTable() {
     const ck = S.checked.has(r.id) ? " checked" : "";
     html += `<tr data-id="${r.id}" class="${cls}">` +
       `<td class="ck-col"><input type="checkbox" class="ck" data-id="${r.id}"${ck}></td>` +
-      cols.map((k, i) => `<td class="${sepOf(k, i)}">${i === 0 ? mark : ""}${fmtCell(k, r[k])}</td>`).join("") + `</tr>`;
+      cols.map((k, i) => `<td class="${sepOf(k, i)}">${i === 0 ? mark : ""}${fmtCell(k, r[srcOf(k)])}</td>`).join("") + `</tr>`;
   });
   html += `</tbody></table>`;
   wrap.innerHTML = html;
@@ -934,7 +957,7 @@ function renderTable() {
     };
   }
   $$("th[data-k]", wrap).forEach(th => th.onclick = () => {   // 最前面那列是勾选框，没有 data-k
-    const k = th.dataset.k;
+    const k = srcOf(th.dataset.k);   // 点影子列的表头 = 按它对应的真字段排序
     if (S.sort.field === k) S.sort.dir = S.sort.dir === "asc" ? "desc" : "asc";
     else { S.sort.field = k; S.sort.dir = "asc"; }
     $("#sortField").value = k; $("#sortDir").value = S.sort.dir;
@@ -1040,11 +1063,15 @@ function buildColPopover() {
     if (!items.length) return "";
     return `<div style="margin-bottom:8px"><div style="font-size:11px;color:var(--muted);margin-bottom:3px">${g}</div>
       <div class="colgrid">${items.map(f =>
-      `<label><input type="checkbox" value="${f.key}" ${S.cols.includes(f.key) ? "checked" : ""}> ${esc(f.label)}</label>`).join("")}</div></div>`;
+      `<label${f.virt ? ` title="副本列：内容和「${esc(f.label)}」一样，只是放在复盘旁边方便对照"` : ""}><input type="checkbox" value="${f.key}" ${S.cols.includes(f.key) ? "checked" : ""}> ${esc(f.label)}${f.virt ? "（副本）" : ""}</label>`).join("")}</div></div>`;
   }).join("");
   $("#colOk").onclick = () => {
-    S.cols = $$("#colGroups input:checked").map(x => x.value);
-    if (!S.cols.length) S.cols = ["new_id"];
+    /* 保持表格现在的左右顺序，只做增删；新勾上的列排在后面，
+       免得只是想多显示一列，结果整个表的顺序被重排一遍 */
+    const on = $$("#colGroups input:checked").map(x => x.value);
+    const keep = S.cols.filter(k => on.indexOf(k) >= 0);
+    on.forEach(k => { if (keep.indexOf(k) < 0) keep.push(k); });
+    S.cols = keep.length ? keep : ["new_id"];
     LS.set(COLS_KEY, JSON.stringify(S.cols));
     $("#colPop").classList.remove("show");
     renderTable();
@@ -1102,7 +1129,7 @@ function renderDrawer(row, isEdit) {
   });
   ["推荐", "基本信息", "赛果", "赔率"].forEach(g => {
     html += `<div class="sect">${g}</div><div class="grid2">`;
-    S.fields.filter(f => f.group === g).forEach(f => {
+    S.fields.filter(f => f.group === g && !f.virt).forEach(f => {   // 影子列不能编辑
       const v = row[f.key] ?? "";
       const type = (f.type === "int" || f.type === "real") ? "number" : "text";
       const step = f.type === "real" ? ' step="0.01"' : "";
